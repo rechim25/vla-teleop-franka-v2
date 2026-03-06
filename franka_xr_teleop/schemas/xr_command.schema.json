@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xr_command.schema.json",
+  "title": "XR Command",
+  "type": "object",
+  "required": [
+    "timestamp_ns",
+    "sequence_id",
+    "teleop_enabled",
+    "clutch_pressed",
+    "target_position_xyz",
+    "target_orientation_xyzw",
+    "gripper_command"
+  ],
+  "properties": {
+    "timestamp_ns": {"type": "integer", "minimum": 0},
+    "sequence_id": {"type": "integer", "minimum": 0},
+    "teleop_enabled": {"type": "boolean"},
+    "clutch_pressed": {"type": "boolean"},
+    "target_position_xyz": {
+      "type": "array",
+      "items": {"type": "number"},
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "target_orientation_xyzw": {
+      "type": "array",
+      "items": {"type": "number"},
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "gripper_command": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+  },
+  "additionalProperties": false
+}

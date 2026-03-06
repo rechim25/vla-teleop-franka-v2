@@ -1,0 +1,8 @@
+teleop:
+  listen_ip: 0.0.0.0
+  listen_port: 28080
+  observation_ip: 127.0.0.1
+  observation_port: 28081
+  allow_motion: true
+  dry_run: false
+  packet_timeout_s: 0.120
