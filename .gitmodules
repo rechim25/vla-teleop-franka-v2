@@ -1,0 +1,4 @@
+[submodule "franka_xr_teleop/third_party/XRoboToolkit-Unity-Client"]
+	path = franka_xr_teleop/third_party/XRoboToolkit-Unity-Client
+	url = git@github.com:rechim25/XRoboToolkit-Unity-Client.git
+	branch = quest3
