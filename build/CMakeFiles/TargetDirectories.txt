@@ -1,3 +1,0 @@
-/home/rechim/vla-teleop-franka-v2/build/CMakeFiles/panda_libfranka_sanity.dir
-/home/rechim/vla-teleop-franka-v2/build/CMakeFiles/edit_cache.dir
-/home/rechim/vla-teleop-franka-v2/build/CMakeFiles/rebuild_cache.dir
