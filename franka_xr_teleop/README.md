@@ -1,18 +1,18 @@
 # franka_xr_teleop
 
-Franka Panda teleoperation bridge for XR inputs.
+Franka Panda teleoperation bridge using **XRoboToolkit PC Service SDK** as the only operator input source.
 
-This module is the Franka-specific interface layer between XRoboToolkit-style operator commands and the libfranka 1 kHz servo loop. It is focused on safe teleoperation and command execution only.
+This module is the Franka-specific interface layer between XR-Robotics tracking/controller data and the libfranka 1 kHz servo loop. It is focused on safe teleoperation and command execution.
 
 ## Scope
 
-- Receive XR operator commands on workstation (UDP)
-- Map XR frame commands into robot-frame Cartesian teleop commands
+- Receive operator state through XR-Robotics SDK callbacks (`PXREAInit` / `PXREADeviceStateJson`)
+- Map XR controller pose into robot-frame Cartesian teleop commands
 - Enforce deadman/clutch/timeout/workspace/rate-limit safety
 - Execute bounded Cartesian deltas through libfranka
 - Publish executed action + robot observation for later recording
 
-Non-goals in this phase:
+Non-goals:
 - dataset export
 - camera recording
 - model training
@@ -24,8 +24,8 @@ franka_xr_teleop/
   cpp/
     teleop_bridge/
       main.cpp
-      xr_receiver.cpp
-      xr_receiver.h
+      xrobotics_source.cpp
+      xrobotics_source.h
       teleop_mapper.cpp
       teleop_mapper.h
       teleop_state_machine.cpp
@@ -48,14 +48,19 @@ franka_xr_teleop/
   schemas/
     xr_command.schema.json
     robot_observation.schema.json
-  tools/
-    inspect_xr_packets.py
-    replay_teleop_session.py
 ```
 
-## Message Contract
+## Input Mapping (Controller-only v1)
 
-Incoming XR command packet fields:
+The bridge maps the **right controller** fields from XR-Robotics state JSON to teleop semantics:
+- `primaryButton` (A): deadman (`teleop_enabled`)
+- `secondaryButton` (B): clutch (`clutch_pressed`)
+- `trigger`: gripper command `[0,1]`
+- `pose` (`x,y,z,qx,qy,qz,qw`): target position/orientation input
+
+## Message Contract (Internal)
+
+Incoming normalized command fields used by the bridge:
 - `timestamp_ns`
 - `sequence_id`
 - `teleop_enabled`
@@ -64,8 +69,7 @@ Incoming XR command packet fields:
 - `target_orientation_xyzw`
 - `gripper_command`
 
-Current transport packet (binary, little-endian):
-- C struct equivalent in `xr_receiver.cpp` (`XRWirePacket`, 72 bytes)
+`timestamp_ns` is stamped on command receive using workstation monotonic time so timeout-to-hold logic is clock-safe.
 
 Outgoing observation stream (UDP JSON):
 - robot state: `q`, `dq`, TCP pose, gripper width
@@ -83,73 +87,62 @@ States:
 
 Motion only occurs in `TELEOP_ACTIVE` when:
 - XR stream is healthy (packet age within timeout)
-- deadman (`teleop_enabled`) is true
+- deadman is true
 - robot is not in reflex/fault mode
+
+## Prerequisites
+
+- Ubuntu 22.04
+- Same Franka setup as `franka-sanity-checks` (`libfranka 0.9.2`, server version 5)
+- XRoboToolkit PC Service installed/running (for example `/opt/apps/roboticsservice/runService.sh`)
 
 ## Build
 
-Uses the same libfranka stack as `franka-sanity-checks` (`0.9.2`, server version 5).
-
 ```bash
 cd /home/radu/vla-teleop-franka-v2/franka_xr_teleop
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DXROBOTICS_SERVICE_ROOT=/opt/apps/roboticsservice
 cmake --build build -j"$(nproc)"
 ```
 
+If SDK paths are non-default, pass `-DXROBOTICS_SDK_ROOT=/path/to/SDK`.
+
 ## Run
 
-Milestone 1 (receive + validate packets, no robot motion):
+Dry-run (SDK input only, no robot motion):
 
 ```bash
-./build/cpp/teleop_bridge/franka_xr_teleop_bridge --dry-run --listen-port 28080
+./build/cpp/teleop_bridge/franka_xr_teleop_bridge --dry-run
 ```
 
-Milestone 3 path (live teleop bridge to robot):
+Live teleop:
 
 ```bash
 ./build/cpp/teleop_bridge/franka_xr_teleop_bridge \
   --robot-ip 192.168.2.200 \
-  --listen-port 28080 \
   --obs-port 28081
 ```
 
-Hold-only validation mode (no robot movement while keeping all data paths live):
+Hold-only mode (data path active, no robot motion):
 
 ```bash
 ./build/cpp/teleop_bridge/franka_xr_teleop_bridge \
   --robot-ip 192.168.2.200 \
-  --listen-port 28080 \
   --obs-port 28081 \
   --no-motion
 ```
 
-## XR Tooling
-
-Inspect incoming XR packets:
-
-```bash
-python3 tools/inspect_xr_packets.py
-```
-
-Replay saved teleop JSONL to bridge UDP input:
-
-```bash
-python3 tools/replay_teleop_session.py /path/to/session.jsonl --ip 127.0.0.1 --port 28080 --hz 90
-```
-
 ## Safety Notes
 
-The 1 kHz callback is RT-safe by design:
+The 1 kHz callback remains RT-safe:
 - no parsing/network I/O in callback
 - no dynamic allocation in callback
-- latest-command lock-free handoff
+- lock-free handoff of latest operator command
 
-Current safety shaping includes:
+Safety shaping includes:
 - packet timeout -> hold
-- clutch recenter behavior
+- clutch recenter
 - max translation/rotation speed limits
 - per-step delta limits
 - workspace clamping
 - jump rejection
-
-Tune limits in `configs/safety.yaml` and mirror those values in code before production runs.

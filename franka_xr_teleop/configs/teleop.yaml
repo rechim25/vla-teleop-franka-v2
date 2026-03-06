@@ -1,6 +1,5 @@
 teleop:
-  listen_ip: 0.0.0.0
-  listen_port: 28080
+  xr_input_source: xrobotics_sdk
   observation_ip: 127.0.0.1
   observation_port: 28081
   allow_motion: true

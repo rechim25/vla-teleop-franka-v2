@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "xr_command.schema.json",
   "title": "XR Command",
+  "description": "Normalized teleop command produced by the XRoboToolkit PC Service SDK callback path.",
   "type": "object",
   "required": [
     "timestamp_ns",
@@ -13,7 +14,11 @@
     "gripper_command"
   ],
   "properties": {
-    "timestamp_ns": {"type": "integer", "minimum": 0},
+    "timestamp_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Workstation monotonic receive timestamp used for packet-age safety checks."
+    },
     "sequence_id": {"type": "integer", "minimum": 0},
     "teleop_enabled": {"type": "boolean"},
     "clutch_pressed": {"type": "boolean"},

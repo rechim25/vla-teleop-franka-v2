@@ -9,7 +9,7 @@
 #include "common_types.h"
 #include "franka_controller.h"
 #include "observation_pub.h"
-#include "xr_receiver.h"
+#include "xrobotics_source.h"
 
 namespace {
 
@@ -23,19 +23,17 @@ struct Options {
   bool dry_run = false;
   bool allow_motion = true;
   std::string robot_ip;
-  std::string bind_ip = "0.0.0.0";
-  uint16_t listen_port = 28080;
   std::string obs_ip = "127.0.0.1";
   uint16_t obs_port = 28081;
 };
 
 void PrintUsage(const char* prog) {
   std::cout << "Usage:\n"
-            << "  " << prog << " --robot-ip <ip> [--bind-ip 0.0.0.0] [--listen-port 28080]\n"
+            << "  " << prog << " --robot-ip <ip>\n"
             << "             [--obs-ip 127.0.0.1] [--obs-port 28081] [--dry-run] [--no-motion]\n\n"
             << "Examples:\n"
-            << "  " << prog << " --dry-run --listen-port 28080\n"
-            << "  " << prog << " --robot-ip 192.168.2.200 --listen-port 28080 --obs-port 28081\n";
+            << "  " << prog << " --dry-run\n"
+            << "  " << prog << " --robot-ip 192.168.2.200 --obs-port 28081\n";
 }
 
 bool ParseArgs(int argc, char** argv, Options* out) {
@@ -54,20 +52,6 @@ bool ParseArgs(int argc, char** argv, Options* out) {
         return false;
       }
       out->robot_ip = argv[++i];
-      continue;
-    }
-    if (arg == "--bind-ip") {
-      if (i + 1 >= argc) {
-        return false;
-      }
-      out->bind_ip = argv[++i];
-      continue;
-    }
-    if (arg == "--listen-port") {
-      if (i + 1 >= argc) {
-        return false;
-      }
-      out->listen_port = static_cast<uint16_t>(std::stoi(argv[++i]));
       continue;
     }
     if (arg == "--obs-ip") {
@@ -118,11 +102,13 @@ int main(int argc, char** argv) {
   teleop::LatestCommandBuffer command_buffer;
   teleop::LatestObservationBuffer observation_buffer;
 
-  teleop::XRReceiver receiver(options.bind_ip,
-                              options.listen_port,
-                              &command_buffer,
-                              &g_stop_requested);
-  receiver.Start();
+  teleop::XrRoboticsSource xr_source(&command_buffer, &g_stop_requested);
+  if (!xr_source.Start()) {
+    std::cerr << "Failed to initialize XR-Robotics SDK source.\n"
+              << "Ensure XRoboToolkit PC Service is installed and running "
+              << "(for example /opt/apps/roboticsservice/runService.sh).\n";
+    return 2;
+  }
 
   teleop::ObservationPublisher observation_pub(options.obs_ip, options.obs_port);
   observation_pub.Start();
@@ -139,15 +125,17 @@ int main(int argc, char** argv) {
   config.allow_motion = options.allow_motion;
 
   if (options.dry_run) {
-    std::cout << "Dry-run mode: receiving XR packets on UDP " << options.bind_ip << ":"
-              << options.listen_port << "\n";
+    std::cout << "Dry-run mode: receiving XR state via XRoboToolkit PC Service SDK callbacks\n";
     uint64_t last_print_ns = 0;
     while (!g_stop_requested.load(std::memory_order_acquire)) {
       const uint64_t now_ns = MonotonicNowNs();
       if (now_ns - last_print_ns > 500000000ULL) {
         const auto cmd = command_buffer.ReadLatest();
         const uint64_t age_ns = now_ns > cmd.timestamp_ns ? (now_ns - cmd.timestamp_ns) : 0;
-        std::cout << "rx_count=" << receiver.received_count() << " dropped=" << receiver.dropped_count()
+        std::cout << "server_connected=" << (xr_source.server_connected() ? 1 : 0)
+                  << " device_connected=" << (xr_source.device_connected() ? 1 : 0)
+                  << " rx_count=" << xr_source.received_count()
+                  << " dropped=" << xr_source.dropped_count()
                   << " seq=" << cmd.sequence_id << " age_ms=" << (age_ns * 1e-6)
                   << " deadman=" << (cmd.teleop_enabled ? 1 : 0)
                   << " clutch=" << (cmd.clutch_pressed ? 1 : 0)
@@ -166,7 +154,7 @@ int main(int argc, char** argv) {
                                               &observation_buffer);
     const int rc = controller.Run(&g_stop_requested);
     g_stop_requested.store(true, std::memory_order_release);
-    receiver.Stop();
+    xr_source.Stop();
     if (observation_thread.joinable()) {
       observation_thread.join();
     }
@@ -175,7 +163,7 @@ int main(int argc, char** argv) {
   }
 
   g_stop_requested.store(true, std::memory_order_release);
-  receiver.Stop();
+  xr_source.Stop();
   if (observation_thread.joinable()) {
     observation_thread.join();
   }

@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Threads REQUIRED)
 find_package(Franka CONFIG QUIET)
+find_package(nlohmann_json CONFIG QUIET)
 set(USE_PKGCONFIG_FRANKA OFF)
 if(NOT Franka_FOUND)
   find_package(PkgConfig REQUIRED)
@@ -22,9 +23,63 @@ if(NOT Franka_FOUND)
   set(USE_PKGCONFIG_FRANKA ON)
 endif()
 
+set(XROBOTICS_SERVICE_ROOT "/opt/apps/roboticsservice" CACHE PATH
+    "XRoboToolkit PC Service installation root (contains SDK/)")
+set(XROBOTICS_SDK_ROOT "${XROBOTICS_SERVICE_ROOT}/SDK" CACHE PATH
+    "XRoboToolkit SDK root directory (contains include/ and linux*/64/)")
+
+find_path(PXREA_SDK_INCLUDE_DIR
+  NAMES PXREARobotSDK.h
+  HINTS
+    "${XROBOTICS_SDK_ROOT}/include"
+    "${XROBOTICS_SERVICE_ROOT}/SDK/include"
+    "$ENV{XROBOTICS_SDK_ROOT}/include"
+    "$ENV{XROBOTICS_SERVICE_ROOT}/SDK/include")
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+  set(_pxrea_lib_subdir "linux_aarch64/64")
+else()
+  set(_pxrea_lib_subdir "linux/64")
+endif()
+
+find_library(PXREA_SDK_LIBRARY
+  NAMES PXREARobotSDK libPXREARobotSDK
+  HINTS
+    "${XROBOTICS_SDK_ROOT}/${_pxrea_lib_subdir}"
+    "${XROBOTICS_SERVICE_ROOT}/SDK/${_pxrea_lib_subdir}"
+    "$ENV{XROBOTICS_SDK_ROOT}/${_pxrea_lib_subdir}"
+    "$ENV{XROBOTICS_SERVICE_ROOT}/SDK/${_pxrea_lib_subdir}"
+    "${XROBOTICS_SDK_ROOT}/lib"
+    "$ENV{XROBOTICS_SDK_ROOT}/lib")
+
+if(NOT PXREA_SDK_INCLUDE_DIR OR NOT PXREA_SDK_LIBRARY)
+  message(FATAL_ERROR
+          "XRoboToolkit SDK not found.\n"
+          "Expected PXREARobotSDK.h and libPXREARobotSDK under SDK paths.\n"
+          "Set -DXROBOTICS_SERVICE_ROOT=/opt/apps/roboticsservice or "
+          "-DXROBOTICS_SDK_ROOT=/path/to/SDK.")
+endif()
+
+if(NOT nlohmann_json_FOUND)
+  find_path(NLOHMANN_JSON_INCLUDE_DIR
+    NAMES nlohmann/json.hpp
+    HINTS
+      "/usr/include"
+      "/usr/local/include"
+      "${XROBOTICS_SERVICE_ROOT}/PXREARobotSDK"
+      "${XROBOTICS_SERVICE_ROOT}/RoboticsService/PXREARobotSDK"
+      "$ENV{XROBOTICS_SERVICE_ROOT}/PXREARobotSDK"
+      "$ENV{XROBOTICS_SERVICE_ROOT}/RoboticsService/PXREARobotSDK")
+  if(NOT NLOHMANN_JSON_INCLUDE_DIR)
+    message(FATAL_ERROR
+            "nlohmann/json.hpp not found.\n"
+            "Install nlohmann-json3-dev or provide include path containing nlohmann/json.hpp.")
+  endif()
+endif()
+
 add_executable(franka_xr_teleop_bridge
   main.cpp
-  xr_receiver.cpp
+  xrobotics_source.cpp
   teleop_mapper.cpp
   teleop_state_machine.cpp
   franka_controller.cpp
@@ -34,6 +89,14 @@ add_executable(franka_xr_teleop_bridge
 )
 
 target_link_libraries(franka_xr_teleop_bridge PRIVATE Threads::Threads)
+target_include_directories(franka_xr_teleop_bridge PRIVATE ${PXREA_SDK_INCLUDE_DIR})
+target_link_libraries(franka_xr_teleop_bridge PRIVATE ${PXREA_SDK_LIBRARY})
+
+if(nlohmann_json_FOUND)
+  target_link_libraries(franka_xr_teleop_bridge PRIVATE nlohmann_json::nlohmann_json)
+else()
+  target_include_directories(franka_xr_teleop_bridge PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
+endif()
 
 if(NOT USE_PKGCONFIG_FRANKA)
   if(DEFINED Franka_VERSION)
