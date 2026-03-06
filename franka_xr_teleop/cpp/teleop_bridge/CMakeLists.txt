@@ -47,8 +47,16 @@ find_library(PXREA_SDK_LIBRARY
   HINTS
     "${XROBOTICS_SDK_ROOT}/${_pxrea_lib_subdir}"
     "${XROBOTICS_SERVICE_ROOT}/SDK/${_pxrea_lib_subdir}"
+    "${XROBOTICS_SDK_ROOT}/x64"
+    "${XROBOTICS_SERVICE_ROOT}/SDK/x64"
+    "${XROBOTICS_SDK_ROOT}/arm64"
+    "${XROBOTICS_SERVICE_ROOT}/SDK/arm64"
     "$ENV{XROBOTICS_SDK_ROOT}/${_pxrea_lib_subdir}"
     "$ENV{XROBOTICS_SERVICE_ROOT}/SDK/${_pxrea_lib_subdir}"
+    "$ENV{XROBOTICS_SDK_ROOT}/x64"
+    "$ENV{XROBOTICS_SERVICE_ROOT}/SDK/x64"
+    "$ENV{XROBOTICS_SDK_ROOT}/arm64"
+    "$ENV{XROBOTICS_SERVICE_ROOT}/SDK/arm64"
     "${XROBOTICS_SDK_ROOT}/lib"
     "$ENV{XROBOTICS_SDK_ROOT}/lib")
 
@@ -68,6 +76,7 @@ if(NOT nlohmann_json_FOUND)
       "/usr/local/include"
       "${XROBOTICS_SERVICE_ROOT}/PXREARobotSDK"
       "${XROBOTICS_SERVICE_ROOT}/RoboticsService/PXREARobotSDK"
+      "${CMAKE_SOURCE_DIR}/third_party/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK"
       "$ENV{XROBOTICS_SERVICE_ROOT}/PXREARobotSDK"
       "$ENV{XROBOTICS_SERVICE_ROOT}/RoboticsService/PXREARobotSDK")
   if(NOT NLOHMANN_JSON_INCLUDE_DIR)

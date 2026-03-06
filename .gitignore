@@ -34,3 +34,5 @@ venv/
 # Environment files
 .env
 .env.*
+
+*.log
