@@ -2,3 +2,12 @@
 	path = franka_xr_teleop/third_party/XRoboToolkit-Unity-Client
 	url = git@github.com:rechim25/XRoboToolkit-Unity-Client.git
 	branch = quest3
+[submodule "franka_xr_teleop/third_party/XRoboToolkit-PC-Service-Pybind"]
+	path = franka_xr_teleop/third_party/XRoboToolkit-PC-Service-Pybind
+	url = https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind.git
+[submodule "franka_xr_teleop/third_party/XRoboToolkit-PC-Service"]
+	path = franka_xr_teleop/third_party/XRoboToolkit-PC-Service
+	url = https://github.com/XR-Robotics/XRoboToolkit-PC-Service.git
+[submodule "franka_xr_teleop/third_party/XRoboToolkit-Teleop-Sample-Cpp"]
+	path = franka_xr_teleop/third_party/XRoboToolkit-Teleop-Sample-Cpp
+	url = https://github.com/XR-Robotics/XRoboToolkit-Teleop-Sample-Cpp.git
