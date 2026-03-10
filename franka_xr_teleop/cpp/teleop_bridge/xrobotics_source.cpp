@@ -2,51 +2,74 @@
 
 #include <PXREARobotSDK.h>
 
-#include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "math_utils.h"
 
 namespace teleop {
 namespace {
 
 using json = nlohmann::json;
 
-uint64_t MonotonicNowNs() {
-  const auto now = std::chrono::steady_clock::now().time_since_epoch();
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
-}
-
-bool ParsePoseString(const std::string& pose_str, std::array<double, 7>* out) {
+bool ParsePoseString(const std::string& pose_str, Pose* out) {
   std::stringstream ss(pose_str);
   std::string token;
+  std::array<double, 7> values{};
   size_t i = 0;
-  while (std::getline(ss, token, ',') && i < out->size()) {
+  while (std::getline(ss, token, ',') && i < values.size()) {
     try {
-      const double v = std::stod(token);
-      if (!std::isfinite(v)) {
+      const double value = std::stod(token);
+      if (!std::isfinite(value)) {
         return false;
       }
-      (*out)[i++] = v;
+      values[i++] = value;
     } catch (...) {
       return false;
     }
   }
-  return i == out->size();
+  if (i != values.size()) {
+    return false;
+  }
+
+  out->p = {values[0], values[1], values[2]};
+  out->q = {values[3], values[4], values[5], values[6]};
+  return true;
+}
+
+double GetDoubleWithFallback(const json& object,
+                             std::initializer_list<const char*> keys,
+                             double fallback) {
+  for (const char* key : keys) {
+    if (object.contains(key) && object[key].is_number()) {
+      return object[key].get<double>();
+    }
+  }
+  return fallback;
+}
+
+bool GetBoolWithFallback(const json& object,
+                         std::initializer_list<const char*> keys,
+                         bool fallback) {
+  for (const char* key : keys) {
+    if (object.contains(key) && object[key].is_boolean()) {
+      return object[key].get<bool>();
+    }
+  }
+  return fallback;
 }
 
 extern "C" void OnPxreaClientCallbackBridge(void* context,
-                                              PXREAClientCallbackType type,
-                                              int status,
-                                              void* user_data) {
+                                            PXREAClientCallbackType type,
+                                            int status,
+                                            void* user_data) {
   if (context == nullptr) {
     return;
   }
@@ -121,7 +144,6 @@ void XrRoboticsSource::OnCallback(int type, int status, void* user_data) {
   }
 
   const auto& state_json = *reinterpret_cast<PXREADevStateJson*>(user_data);
-
   json root = json::parse(state_json.stateJson, nullptr, false);
   if (root.is_discarded() || !root.contains("value") || !root["value"].is_string()) {
     dropped_count_.fetch_add(1, std::memory_order_acq_rel);
@@ -146,22 +168,22 @@ void XrRoboticsSource::OnCallback(int type, int status, void* user_data) {
     return;
   }
 
-  std::array<double, 7> pose{};
-  if (!ParsePoseString(right["pose"].get<std::string>(), &pose)) {
+  XRCommand cmd{};
+  if (!ParsePoseString(right["pose"].get<std::string>(), &cmd.right_controller_pose)) {
     dropped_count_.fetch_add(1, std::memory_order_acq_rel);
     return;
   }
 
-  // Use local monotonic receive time for timeout gating in the servo loop.
   const uint64_t receive_ns = MonotonicNowNs();
-  XRCommand cmd{};
   cmd.timestamp_ns = receive_ns;
   cmd.sequence_id = sequence_id_.fetch_add(1, std::memory_order_acq_rel) + 1;
-  cmd.teleop_enabled = right.value("primaryButton", false);   // A button on right controller.
-  cmd.clutch_pressed = right.value("secondaryButton", false); // B button on right controller.
-  cmd.target_position_xyz = {pose[0], pose[1], pose[2]};
-  cmd.target_orientation_xyzw = {pose[3], pose[4], pose[5], pose[6]};
-  cmd.gripper_command = std::clamp(right.value("trigger", 1.0), 0.0, 1.0);
+  cmd.control_trigger_value = Clamp01(
+      GetDoubleWithFallback(right, {"grip", "squeeze"}, right.value("primaryButton", false) ? 1.0 : 0.0));
+  cmd.gripper_trigger_value = Clamp01(GetDoubleWithFallback(right, {"trigger"}, 0.0));
+  cmd.button_a = right.value("primaryButton", false);
+  cmd.button_b = right.value("secondaryButton", false);
+  cmd.right_axis_click =
+      GetBoolWithFallback(right, {"axisClick", "primary2DAxisClick", "rightAxisClick"}, false);
 
   cmd_buffer_->Publish(cmd);
   received_count_.fetch_add(1, std::memory_order_acq_rel);

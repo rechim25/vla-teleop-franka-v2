@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Threads REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(yaml-cpp CONFIG QUIET)
 find_package(Franka CONFIG QUIET)
 find_package(nlohmann_json CONFIG QUIET)
 set(USE_PKGCONFIG_FRANKA OFF)
@@ -21,6 +23,17 @@ if(NOT Franka_FOUND)
             "Franka_DIR/CMAKE_PREFIX_PATH or pkg-config paths.")
   endif()
   set(USE_PKGCONFIG_FRANKA ON)
+endif()
+
+set(USE_PKGCONFIG_YAMLCPP OFF)
+if(NOT yaml-cpp_FOUND AND NOT TARGET yaml-cpp)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(YAMLCPP QUIET yaml-cpp)
+  if(NOT YAMLCPP_FOUND)
+    message(FATAL_ERROR
+            "yaml-cpp not found. Install libyaml-cpp-dev or provide CMake package paths.")
+  endif()
+  set(USE_PKGCONFIG_YAMLCPP ON)
 endif()
 
 set(XROBOTICS_SERVICE_ROOT "/opt/apps/roboticsservice" CACHE PATH
@@ -88,16 +101,17 @@ endif()
 
 add_executable(franka_xr_teleop_bridge
   main.cpp
+  config_loader.cpp
   xrobotics_source.cpp
   teleop_mapper.cpp
   teleop_state_machine.cpp
   franka_controller.cpp
   safety.cpp
-  gripper.cpp
   observation_pub.cpp
 )
 
 target_link_libraries(franka_xr_teleop_bridge PRIVATE Threads::Threads)
+target_link_libraries(franka_xr_teleop_bridge PRIVATE Eigen3::Eigen)
 target_include_directories(franka_xr_teleop_bridge PRIVATE ${PXREA_SDK_INCLUDE_DIR})
 target_link_libraries(franka_xr_teleop_bridge PRIVATE ${PXREA_SDK_LIBRARY})
 
@@ -105,6 +119,19 @@ if(nlohmann_json_FOUND)
   target_link_libraries(franka_xr_teleop_bridge PRIVATE nlohmann_json::nlohmann_json)
 else()
   target_include_directories(franka_xr_teleop_bridge PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
+endif()
+
+if(TARGET yaml-cpp)
+  target_link_libraries(franka_xr_teleop_bridge PRIVATE yaml-cpp)
+elseif(TARGET yaml-cpp::yaml-cpp)
+  target_link_libraries(franka_xr_teleop_bridge PRIVATE yaml-cpp::yaml-cpp)
+elseif(USE_PKGCONFIG_YAMLCPP)
+  target_include_directories(franka_xr_teleop_bridge PRIVATE ${YAMLCPP_INCLUDE_DIRS})
+  target_link_directories(franka_xr_teleop_bridge PRIVATE ${YAMLCPP_LIBRARY_DIRS})
+  target_link_libraries(franka_xr_teleop_bridge PRIVATE ${YAMLCPP_LIBRARIES})
+  target_compile_options(franka_xr_teleop_bridge PRIVATE ${YAMLCPP_CFLAGS_OTHER})
+else()
+  message(FATAL_ERROR "Could not find a known yaml-cpp CMake target.")
 endif()
 
 if(NOT USE_PKGCONFIG_FRANKA)

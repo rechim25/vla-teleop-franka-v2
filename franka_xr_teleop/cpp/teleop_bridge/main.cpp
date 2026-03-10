@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "common_types.h"
+#include "config_loader.h"
 #include "franka_controller.h"
 #include "observation_pub.h"
 #include "xrobotics_source.h"
@@ -20,30 +21,48 @@ void HandleSignal(int) {
 }
 
 struct Options {
+  std::string config_dir = "configs";
+  bool dry_run_override = false;
   bool dry_run = false;
+  bool allow_motion_override = false;
   bool allow_motion = true;
+  bool robot_ip_override = false;
   std::string robot_ip;
-  std::string obs_ip = "127.0.0.1";
+  bool obs_ip_override = false;
+  std::string obs_ip;
+  bool obs_port_override = false;
   uint16_t obs_port = 28081;
+  bool control_mode_override = false;
+  teleop::ControlMode control_mode = teleop::ControlMode::kPose;
 };
 
 void PrintUsage(const char* prog) {
   std::cout << "Usage:\n"
-            << "  " << prog << " --robot-ip <ip>\n"
-            << "             [--obs-ip 127.0.0.1] [--obs-port 28081] [--dry-run] [--no-motion]\n\n"
+            << "  " << prog << " [--config-dir configs] [--dry-run] [--no-motion]\n"
+            << "             [--robot-ip <ip>] [--obs-ip <ip>] [--obs-port <port>]\n"
+            << "             [--control-mode <pose|position>]\n\n"
             << "Examples:\n"
             << "  " << prog << " --dry-run\n"
-            << "  " << prog << " --robot-ip 192.168.2.200 --obs-port 28081\n";
+            << "  " << prog << " --robot-ip 192.168.2.200 --control-mode position\n";
 }
 
 bool ParseArgs(int argc, char** argv, Options* out) {
   for (int i = 1; i < argc; ++i) {
     const std::string arg(argv[i]);
+    if (arg == "--config-dir") {
+      if (i + 1 >= argc) {
+        return false;
+      }
+      out->config_dir = argv[++i];
+      continue;
+    }
     if (arg == "--dry-run") {
+      out->dry_run_override = true;
       out->dry_run = true;
       continue;
     }
     if (arg == "--no-motion") {
+      out->allow_motion_override = true;
       out->allow_motion = false;
       continue;
     }
@@ -51,6 +70,7 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       if (i + 1 >= argc) {
         return false;
       }
+      out->robot_ip_override = true;
       out->robot_ip = argv[++i];
       continue;
     }
@@ -58,6 +78,7 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       if (i + 1 >= argc) {
         return false;
       }
+      out->obs_ip_override = true;
       out->obs_ip = argv[++i];
       continue;
     }
@@ -65,17 +86,25 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       if (i + 1 >= argc) {
         return false;
       }
+      out->obs_port_override = true;
       out->obs_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+      continue;
+    }
+    if (arg == "--control-mode") {
+      if (i + 1 >= argc) {
+        return false;
+      }
+      if (!teleop::ParseControlMode(argv[++i], &out->control_mode) ||
+          out->control_mode == teleop::ControlMode::kHold) {
+        return false;
+      }
+      out->control_mode_override = true;
       continue;
     }
     if (arg == "-h" || arg == "--help") {
       PrintUsage(argv[0]);
       std::exit(0);
     }
-    return false;
-  }
-
-  if (!out->dry_run && out->robot_ip.empty()) {
     return false;
   }
   return true;
@@ -96,6 +125,40 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  teleop::AppConfig config;
+  std::string config_error;
+  if (!teleop::LoadAppConfig(options.config_dir, &config, &config_error)) {
+    if (options.config_dir == "configs") {
+      const std::string fallback_config_dir = "franka_xr_teleop/configs";
+      if (!teleop::LoadAppConfig(fallback_config_dir, &config, &config_error)) {
+        std::cerr << "Config error: " << config_error << "\n";
+        return 1;
+      }
+    } else {
+      std::cerr << "Config error: " << config_error << "\n";
+      return 1;
+    }
+  }
+
+  if (options.dry_run_override) {
+    config.dry_run = options.dry_run;
+  }
+  if (options.allow_motion_override) {
+    config.bridge.allow_motion = options.allow_motion;
+  }
+  if (options.robot_ip_override) {
+    config.bridge.robot_ip = options.robot_ip;
+  }
+  if (options.obs_ip_override) {
+    config.observation_ip = options.obs_ip;
+  }
+  if (options.obs_port_override) {
+    config.observation_port = options.obs_port;
+  }
+  if (options.control_mode_override) {
+    config.bridge.teleop.control_mode = options.control_mode;
+  }
+
   std::signal(SIGINT, HandleSignal);
   std::signal(SIGTERM, HandleSignal);
 
@@ -104,13 +167,13 @@ int main(int argc, char** argv) {
 
   teleop::XrRoboticsSource xr_source(&command_buffer, &g_stop_requested);
   if (!xr_source.Start()) {
-    std::cerr << "Failed to initialize XR-Robotics SDK source.\n"
+    std::cerr << "Failed to initialize XRoboToolkit SDK source.\n"
               << "Ensure XRoboToolkit PC Service is installed and running "
               << "(for example /opt/apps/roboticsservice/runService.sh).\n";
     return 2;
   }
 
-  teleop::ObservationPublisher observation_pub(options.obs_ip, options.obs_port);
+  teleop::ObservationPublisher observation_pub(config.observation_ip, config.observation_port);
   observation_pub.Start();
 
   std::thread observation_thread([&]() {
@@ -121,37 +184,36 @@ int main(int argc, char** argv) {
     }
   });
 
-  teleop::TeleopBridgeConfig config;
-  config.allow_motion = options.allow_motion;
-
-  if (options.dry_run) {
-    std::cout << "Dry-run mode: receiving XR state via XRoboToolkit PC Service SDK callbacks\n";
+  if (config.dry_run) {
+    std::cout << "Dry-run mode: receiving XR state via XRoboToolkit PC Service callbacks\n";
     uint64_t last_print_ns = 0;
     while (!g_stop_requested.load(std::memory_order_acquire)) {
       const uint64_t now_ns = MonotonicNowNs();
       if (now_ns - last_print_ns > 500000000ULL) {
-        const auto cmd = command_buffer.ReadLatest();
+        const teleop::XRCommand cmd = command_buffer.ReadLatest();
         const uint64_t age_ns = now_ns > cmd.timestamp_ns ? (now_ns - cmd.timestamp_ns) : 0;
         std::cout << "server_connected=" << (xr_source.server_connected() ? 1 : 0)
                   << " device_connected=" << (xr_source.device_connected() ? 1 : 0)
                   << " rx_count=" << xr_source.received_count()
                   << " dropped=" << xr_source.dropped_count()
-                  << " seq=" << cmd.sequence_id << " age_ms=" << (age_ns * 1e-6)
-                  << " deadman=" << (cmd.teleop_enabled ? 1 : 0)
-                  << " clutch=" << (cmd.clutch_pressed ? 1 : 0)
-                  << " gripper=" << cmd.gripper_command << "\n";
+                  << " seq=" << cmd.sequence_id
+                  << " age_ms=" << (age_ns * 1e-6)
+                  << " right_grip=" << cmd.control_trigger_value
+                  << " right_trigger=" << cmd.gripper_trigger_value
+                  << " A=" << (cmd.button_a ? 1 : 0)
+                  << " B=" << (cmd.button_b ? 1 : 0)
+                  << " right_axis_click=" << (cmd.right_axis_click ? 1 : 0)
+                  << "\n";
         last_print_ns = now_ns;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
   } else {
     teleop::FrankaControllerOptions controller_options;
-    controller_options.robot_ip = options.robot_ip;
+    controller_options.robot_ip = config.bridge.robot_ip;
+    teleop::FrankaTeleopController controller(
+        controller_options, config.bridge, &command_buffer, &observation_buffer);
 
-    teleop::FrankaTeleopController controller(controller_options,
-                                              config,
-                                              &command_buffer,
-                                              &observation_buffer);
     const int rc = controller.Run(&g_stop_requested);
     g_stop_requested.store(true, std::memory_order_release);
     xr_source.Stop();

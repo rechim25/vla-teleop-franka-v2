@@ -1,9 +1,9 @@
 xr_frame:
   description: "XR tracking frame to Franka base frame mapping"
   rotation_matrix_row_major:
-    - [1.0, 0.0, 0.0]
+    - [0.0, 0.0, -1.0]
+    - [-1.0, 0.0, 0.0]
     - [0.0, 1.0, 0.0]
-    - [0.0, 0.0, 1.0]
   notes:
-    - "Adjust axis signs/rotation after XR-side validation"
-    - "Use clutch to recenter without robot motion"
+    - "Matches XRoboToolkit sample R_HEADSET_TO_WORLD default."
+    - "Tune only after confirming right-controller delta direction on real hardware."

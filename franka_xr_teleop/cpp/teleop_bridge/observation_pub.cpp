@@ -13,16 +13,6 @@
 namespace teleop {
 namespace {
 
-const char* ControlModeToString(ControlMode mode) {
-  switch (mode) {
-    case ControlMode::kHold:
-      return "HOLD";
-    case ControlMode::kCartesianDelta:
-      return "CARTESIAN_DELTA";
-  }
-  return "UNKNOWN";
-}
-
 template <size_t N>
 void AppendArray(std::ostringstream* os, const std::array<double, N>& values) {
   *os << '[';
@@ -97,15 +87,20 @@ std::string ObservationPublisher::ToJson(const RobotObservation& obs) const {
   ss << "},";
 
   ss << "\"status\":{";
-  ss << "\"control_mode\":\"" << ControlModeToString(obs.control_mode) << "\",";
+  ss << "\"control_mode\":\"" << ToString(obs.control_mode) << "\",";
   ss << "\"teleop_state\":\"" << ToString(obs.teleop_state) << "\",";
   ss << "\"packet_age_ns\":" << obs.packet_age_ns << ',';
+  ss << "\"target_age_ns\":" << obs.target_age_ns << ',';
+  ss << "\"target_fresh\":" << (obs.target_fresh ? "true" : "false") << ',';
+  ss << "\"teleop_active\":" << (obs.teleop_active ? "true" : "false") << ',';
+  ss << "\"target_manipulability\":" << obs.target_manipulability << ',';
   ss << "\"fault_flags\":{";
   ss << "\"packet_timeout\":" << (obs.faults.packet_timeout ? "true" : "false") << ',';
   ss << "\"jump_rejected\":" << (obs.faults.jump_rejected ? "true" : "false") << ',';
   ss << "\"workspace_clamped\":" << (obs.faults.workspace_clamped ? "true" : "false") << ',';
   ss << "\"robot_not_ready\":" << (obs.faults.robot_not_ready ? "true" : "false") << ',';
-  ss << "\"control_exception\":" << (obs.faults.control_exception ? "true" : "false");
+  ss << "\"control_exception\":" << (obs.faults.control_exception ? "true" : "false") << ',';
+  ss << "\"ik_rejected\":" << (obs.faults.ik_rejected ? "true" : "false");
   ss << "}}";
   ss << '}';
 

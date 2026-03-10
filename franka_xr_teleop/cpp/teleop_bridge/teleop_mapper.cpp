@@ -1,127 +1,86 @@
 #include "teleop_mapper.h"
 
-#include <algorithm>
-#include <cmath>
+#include <Eigen/Geometry>
+
+#include "math_utils.h"
 
 namespace teleop {
-namespace {
-
-std::array<double, 4> NormalizeQuat(const std::array<double, 4>& q) {
-  const double n = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
-  if (n < 1e-12) {
-    return {0.0, 0.0, 0.0, 1.0};
-  }
-  return {q[0] / n, q[1] / n, q[2] / n, q[3] / n};
-}
-
-std::array<double, 4> QuatConjugate(const std::array<double, 4>& q) {
-  return {-q[0], -q[1], -q[2], q[3]};
-}
-
-std::array<double, 4> QuatMultiply(const std::array<double, 4>& a, const std::array<double, 4>& b) {
-  return {
-      a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-      a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-      a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-      a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-  };
-}
-
-std::array<double, 3> QuatToRotVec(const std::array<double, 4>& q_in) {
-  const auto q = NormalizeQuat(q_in);
-  const double w = std::clamp(q[3], -1.0, 1.0);
-  const double angle = 2.0 * std::acos(w);
-  const double s = std::sqrt(std::max(1.0 - w * w, 0.0));
-  if (s < 1e-8) {
-    return {0.0, 0.0, 0.0};
-  }
-  return {(q[0] / s) * angle, (q[1] / s) * angle, (q[2] / s) * angle};
-}
-
-std::array<double, 4> RotVecToQuat(const std::array<double, 3>& r) {
-  const double angle = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
-  if (angle < 1e-8) {
-    return {0.0, 0.0, 0.0, 1.0};
-  }
-  const double half = 0.5 * angle;
-  const double s = std::sin(half) / angle;
-  return {r[0] * s, r[1] * s, r[2] * s, std::cos(half)};
-}
-
-}  // namespace
 
 TeleopMapper::TeleopMapper(const TeleopBridgeConfig& config) : config_(config) {}
 
-void TeleopMapper::Reset(const Pose& robot_pose, const XRCommand& xr_cmd) {
-  initialized_ = true;
-  anchor_robot_pose_ = robot_pose;
-  anchor_xr_pos_ = xr_cmd.target_position_xyz;
-  anchor_xr_quat_ = NormalizeQuat(xr_cmd.target_orientation_xyzw);
-  last_clutch_pressed_ = xr_cmd.clutch_pressed;
+void TeleopMapper::Reset() {
+  anchor_initialized_ = false;
 }
 
-std::array<double, 3> TeleopMapper::RotateXrVectorToRobot(const std::array<double, 3>& v) const {
+std::array<double, 3> TeleopMapper::RotateXrVectorToRobot(const std::array<double, 3>& value) const {
   std::array<double, 3> out{};
-  for (size_t i = 0; i < 3; ++i) {
-    out[i] = config_.xr_to_robot_rotation[i][0] * v[0] +
-             config_.xr_to_robot_rotation[i][1] * v[1] +
-             config_.xr_to_robot_rotation[i][2] * v[2];
+  for (size_t row = 0; row < 3; ++row) {
+    out[row] = config_.xr_to_robot_rotation[row][0] * value[0] +
+               config_.xr_to_robot_rotation[row][1] * value[1] +
+               config_.xr_to_robot_rotation[row][2] * value[2];
   }
   return out;
 }
 
-bool TeleopMapper::MapToTarget(const Pose& current_robot_pose,
-                               const XRCommand& xr_cmd,
-                               bool teleop_active,
-                               bool clutch_pressed,
-                               Pose* mapped_target_pose,
-                               TeleopAction* raw_action) {
-  if (!initialized_) {
-    Reset(current_robot_pose, xr_cmd);
-  }
-
-  if (!teleop_active) {
-    Reset(current_robot_pose, xr_cmd);
+bool TeleopMapper::ComputeTargetPose(const Pose& current_robot_pose,
+                                     const XRCommand& xr_cmd,
+                                     bool teleop_active,
+                                     ControlMode control_mode,
+                                     Pose* mapped_target_pose,
+                                     TeleopAction* requested_action) {
+  if (!teleop_active || control_mode == ControlMode::kHold) {
+    Reset();
     return false;
   }
 
-  if (clutch_pressed) {
-    Reset(current_robot_pose, xr_cmd);
+  if (!anchor_initialized_) {
+    anchor_robot_pose_ = current_robot_pose;
+    anchor_xr_pose_ = xr_cmd.right_controller_pose;
+    anchor_initialized_ = true;
     return false;
   }
-
-  if (last_clutch_pressed_ && !clutch_pressed) {
-    // Clutch released: re-anchor from current state to avoid jump.
-    Reset(current_robot_pose, xr_cmd);
-  }
-  last_clutch_pressed_ = clutch_pressed;
 
   const std::array<double, 3> xr_delta = {
-      xr_cmd.target_position_xyz[0] - anchor_xr_pos_[0],
-      xr_cmd.target_position_xyz[1] - anchor_xr_pos_[1],
-      xr_cmd.target_position_xyz[2] - anchor_xr_pos_[2],
+      xr_cmd.right_controller_pose.p[0] - anchor_xr_pose_.p[0],
+      xr_cmd.right_controller_pose.p[1] - anchor_xr_pose_.p[1],
+      xr_cmd.right_controller_pose.p[2] - anchor_xr_pose_.p[2],
   };
-
-  const std::array<double, 3> robot_delta = RotateXrVectorToRobot(xr_delta);
-
-  const std::array<double, 4> q_xr = NormalizeQuat(xr_cmd.target_orientation_xyzw);
-  const std::array<double, 4> q_anchor_xr = NormalizeQuat(anchor_xr_quat_);
-  const std::array<double, 4> q_delta_xr = NormalizeQuat(QuatMultiply(q_xr, QuatConjugate(q_anchor_xr)));
-
-  const std::array<double, 3> rotvec_xr = QuatToRotVec(q_delta_xr);
-  const std::array<double, 3> rotvec_robot = RotateXrVectorToRobot(rotvec_xr);
-  const std::array<double, 4> q_delta_robot = NormalizeQuat(RotVecToQuat(rotvec_robot));
+  std::array<double, 3> robot_delta = RotateXrVectorToRobot(xr_delta);
+  for (double& value : robot_delta) {
+    value *= config_.teleop.scale_factor;
+  }
 
   mapped_target_pose->p = {
       anchor_robot_pose_.p[0] + robot_delta[0],
       anchor_robot_pose_.p[1] + robot_delta[1],
       anchor_robot_pose_.p[2] + robot_delta[2],
   };
-  mapped_target_pose->q = NormalizeQuat(QuatMultiply(q_delta_robot, anchor_robot_pose_.q));
 
-  raw_action->delta_translation_m = robot_delta;
-  raw_action->delta_rotation_rad = rotvec_robot;
-  raw_action->gripper_command = std::clamp(xr_cmd.gripper_command, 0.0, 1.0);
+  requested_action->delta_translation_m = robot_delta;
+  requested_action->gripper_command = Clamp01(xr_cmd.gripper_trigger_value);
+
+  if (control_mode == ControlMode::kPosition) {
+    mapped_target_pose->q = anchor_robot_pose_.q;
+    requested_action->delta_rotation_rad = {0.0, 0.0, 0.0};
+    return true;
+  }
+
+  const Eigen::Quaterniond xr_current = ToEigenQuat(xr_cmd.right_controller_pose.q);
+  const Eigen::Quaterniond xr_anchor = ToEigenQuat(anchor_xr_pose_.q);
+  const Eigen::Vector3d xr_rot_delta = QuaternionErrorAngleAxis(xr_anchor, xr_current);
+  const std::array<double, 3> xr_rot_array = ToArray3(xr_rot_delta);
+  const std::array<double, 3> robot_rot_array = RotateXrVectorToRobot(xr_rot_array);
+  const Eigen::Vector3d robot_rot_delta =
+      Eigen::Vector3d(robot_rot_array[0], robot_rot_array[1], robot_rot_array[2]);
+
+  const double angle = robot_rot_delta.norm();
+  Eigen::Quaterniond delta_q = Eigen::Quaterniond::Identity();
+  if (angle > 1e-9) {
+    delta_q = Eigen::AngleAxisd(angle, robot_rot_delta / angle);
+  }
+
+  mapped_target_pose->q = ToArrayQuat(delta_q * ToEigenQuat(anchor_robot_pose_.q));
+  requested_action->delta_rotation_rad = robot_rot_array;
   return true;
 }
 
