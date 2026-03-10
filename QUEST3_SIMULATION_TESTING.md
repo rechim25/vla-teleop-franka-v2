@@ -3,6 +3,41 @@
 ## Goal
 Validate our Quest 3 port and the official XRoboToolkit Quest workflow in simulation (non-ROS) before any real robot test.
 
+## Daily Restart Quickstart (Copy/Paste)
+
+Use this each time PC/Quest has been restarted.
+
+### 1) USB tunnel setup (Quest connected by USB)
+
+```bash
+adb reverse --remove-all
+adb reverse tcp:63901 tcp:63901
+adb reverse --list
+```
+
+In Quest app, connect to `127.0.0.1`.
+
+### 2) Start PC service
+
+```bash
+pkill -f RoboticsServiceProcess
+/opt/apps/roboticsservice/run3D.sh
+```
+
+### 3) Start simulation backend
+
+```bash
+cd /home/rechim/vla-teleop-franka-v2/franka_xr_teleop/third_party/XRoboToolkit-Teleop-Sample-Python
+conda activate xr
+python scripts/simulation/teleop_dual_ur5e_mujoco.py
+```
+
+### 4) Quest app toggles
+
+- `Controller` ON
+- `Send` ON (or `Switch w/ A Button` ON and press A)
+- Hold grips to move arms, use triggers for grippers
+
 ## 1) Install XRoboToolkit PC Service on Ubuntu 22.04 (amd64)
 
 Check architecture:
