@@ -126,6 +126,10 @@ struct RobotObservation {
 };
 
 struct SafetyLimits {
+  double max_translation_speed_mps = 0.20;
+  double max_rotation_speed_rps = 0.80;
+  double max_step_translation_m = 0.0015;
+  double max_step_rotation_rad = 0.010;
   double packet_timeout_s = 0.120;
   double jump_reject_translation_m = 0.08;
   double jump_reject_rotation_rad = 0.80;
@@ -137,7 +141,11 @@ struct TeleopRuntimeConfig {
   ControlMode control_mode = ControlMode::kPose;
   double scale_factor = 0.8;
   double control_trigger_threshold = 0.9;
+  double control_trigger_release_threshold = 0.8;
   double planner_rate_hz = 100.0;
+  double target_pose_filter_alpha = 0.2;
+  double target_position_deadband_m = 0.001;
+  double target_orientation_deadband_rad = 0.01;
   std::array<double, 7> start_joint_positions_rad{
       {0.0, -0.7853981633974483, 0.0, -2.356194490192345, 0.0, 1.5707963267948966, 0.7853981633974483}};
 };
@@ -154,10 +162,14 @@ struct GripperConfig {
 struct IkConfig {
   double damping = 0.05;
   double nullspace_gain = 0.15;
+  double nullspace_activation_position_error_m = 0.01;
+  double nullspace_activation_orientation_error_rad = 0.10;
   double max_joint_velocity_radps = 0.35;
   double max_joint_step_rad = 0.008;
   double position_gain = 3.0;
   double orientation_gain = 2.0;
+  double position_error_deadband_m = 0.0005;
+  double orientation_error_deadband_rad = 0.005;
   double manipulability_threshold = 0.05;
   double singularity_damping_gain = 1.0;
 };

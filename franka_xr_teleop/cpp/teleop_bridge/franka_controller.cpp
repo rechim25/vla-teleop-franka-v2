@@ -147,12 +147,21 @@ bool SolveIkStep(const franka::Model& model,
   Eigen::Matrix<double, 6, 7> jacobian_task = jacobian;
 
   Eigen::Matrix<double, 6, 1> task_error = Eigen::Matrix<double, 6, 1>::Zero();
-  const Eigen::Vector3d position_error = ToEigen(desired_pose.p) - ToEigen(snapshot.tcp_pose.p);
+  Eigen::Vector3d position_error = ToEigen(desired_pose.p) - ToEigen(snapshot.tcp_pose.p);
+  if (position_error.norm() < config.ik.position_error_deadband_m) {
+    position_error.setZero();
+  }
+  const double position_error_norm = position_error.norm();
   task_error.head<3>() = config.ik.position_gain * position_error;
 
+  double rotation_error_norm = 0.0;
   if (control_mode == ControlMode::kPose) {
-    const Eigen::Vector3d rotation_error =
+    Eigen::Vector3d rotation_error =
         QuaternionErrorAngleAxis(ToEigenQuat(snapshot.tcp_pose.q), ToEigenQuat(desired_pose.q));
+    if (rotation_error.norm() < config.ik.orientation_error_deadband_rad) {
+      rotation_error.setZero();
+    }
+    rotation_error_norm = rotation_error.norm();
     task_error.tail<3>() = config.ik.orientation_gain * rotation_error;
   } else {
     jacobian_task.bottomRows<3>().setZero();
@@ -183,8 +192,19 @@ bool SolveIkStep(const franka::Model& model,
   const Eigen::Matrix<double, 7, 7> nullspace_projector =
       Eigen::Matrix<double, 7, 7>::Identity() -
       jacobian_task.transpose() * a_ldlt.solve(jacobian_task);
+  const double nullspace_pos_ratio =
+      position_error_norm /
+      std::max(config.ik.nullspace_activation_position_error_m, 1e-6);
+  const double nullspace_rot_ratio =
+      (control_mode == ControlMode::kPose)
+          ? rotation_error_norm /
+                std::max(config.ik.nullspace_activation_orientation_error_rad, 1e-6)
+          : 0.0;
+  const double nullspace_activation =
+      std::clamp(std::max(nullspace_pos_ratio, nullspace_rot_ratio), 0.0, 1.0);
   Eigen::Matrix<double, 7, 1> dq =
-      dq_primary + config.ik.nullspace_gain * nullspace_projector * (q_home - q_current);
+      dq_primary +
+      (config.ik.nullspace_gain * nullspace_activation) * nullspace_projector * (q_home - q_current);
 
   const double dt = 1.0 / config.teleop.planner_rate_hz;
   std::array<double, 7> q_next = snapshot.q;
@@ -217,9 +237,18 @@ void PlannerLoop(const TeleopBridgeConfig& config,
     SafetyFilter safety(config.safety);
     TeleopMapper mapper(config);
     TeleopStateMachine state_machine;
+    Pose filtered_desired_pose{};
+    bool filtered_pose_initialized = false;
+    bool deadman_latched = false;
+    uint64_t last_planner_tick_ns = MonotonicNowNs();
 
     while (!stop_requested->load(std::memory_order_acquire)) {
       const uint64_t now_ns = MonotonicNowNs();
+      const double control_dt_s = static_cast<double>(
+                                      now_ns > last_planner_tick_ns ? (now_ns - last_planner_tick_ns)
+                                                                    : 0) *
+                                  1e-9;
+      last_planner_tick_ns = now_ns;
       const XRCommand xr_cmd = command_buffer->ReadLatest();
       const RobotSnapshot robot = robot_state_buffer->ReadLatest();
 
@@ -244,8 +273,13 @@ void PlannerLoop(const TeleopBridgeConfig& config,
 
       StateInputs inputs{};
       inputs.xr_stream_healthy = safety.IsStreamHealthy(packet_age_s);
-      inputs.deadman_pressed =
-          (xr_cmd.control_trigger_value >= config.teleop.control_trigger_threshold);
+      if (deadman_latched) {
+        deadman_latched =
+            (xr_cmd.control_trigger_value >= config.teleop.control_trigger_release_threshold);
+      } else {
+        deadman_latched = (xr_cmd.control_trigger_value >= config.teleop.control_trigger_threshold);
+      }
+      inputs.deadman_pressed = deadman_latched;
       inputs.robot_ok = robot.robot_ok;
       inputs.fault_requested = false;
       inputs.clear_fault_requested = true;
@@ -259,6 +293,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
 
       if (!planned.teleop_active) {
         mapper.Reset();
+        filtered_pose_initialized = false;
         planned_target_buffer->Publish(planned);
         std::this_thread::sleep_for(sleep_period);
         continue;
@@ -284,24 +319,48 @@ void PlannerLoop(const TeleopBridgeConfig& config,
 
       Pose safe_pose{};
       const bool safe_target = safety.FilterTargetPose(
-          robot.tcp_pose, desired_pose, packet_age_s, &planned.faults, &safe_pose);
-      planned.desired_tcp_pose = safe_pose;
+          robot.tcp_pose, desired_pose, packet_age_s, control_dt_s, &planned.faults, &safe_pose);
       if (!safe_target) {
         if (planned.faults.jump_rejected) {
           // Re-anchor immediately so long motions recover without deadman release/re-press.
           mapper.Reset();
         }
+        filtered_pose_initialized = false;
         planned.control_mode = ControlMode::kHold;
         planned_target_buffer->Publish(planned);
         std::this_thread::sleep_for(sleep_period);
         continue;
       }
 
+      const double filter_alpha = std::clamp(config.teleop.target_pose_filter_alpha, 0.0, 1.0);
+      if (!filtered_pose_initialized) {
+        filtered_desired_pose = safe_pose;
+        filtered_pose_initialized = true;
+      } else {
+        const Eigen::Vector3d filtered_translation_error =
+            ToEigen(safe_pose.p) - ToEigen(filtered_desired_pose.p);
+        if (filtered_translation_error.norm() >= config.teleop.target_position_deadband_m) {
+          filtered_desired_pose.p =
+              ToArray3(ToEigen(filtered_desired_pose.p) + filter_alpha * filtered_translation_error);
+        }
+
+        const Eigen::Quaterniond q_filtered = ToEigenQuat(filtered_desired_pose.q);
+        const Eigen::Quaterniond q_target = ToEigenQuat(safe_pose.q);
+        const Eigen::Vector3d filtered_rotation_error = QuaternionErrorAngleAxis(q_filtered, q_target);
+        if (filtered_rotation_error.norm() >= config.teleop.target_orientation_deadband_rad) {
+          filtered_desired_pose.q = ToArrayQuat(q_filtered.slerp(filter_alpha, q_target));
+        }
+      }
+
+      planned.desired_tcp_pose = filtered_desired_pose;
+      planned.requested_action = DescribeAction(
+          robot.tcp_pose, filtered_desired_pose, Clamp01(xr_cmd.gripper_trigger_value));
+
       double manipulability = 0.0;
       std::array<double, 7> q_target = robot.q;
       if (!SolveIkStep(model,
                        robot,
-                       safe_pose,
+                       filtered_desired_pose,
                        config,
                        planned.control_mode,
                        &q_target,
@@ -460,6 +519,11 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
                                    stop_requested);
     }
 
+    std::array<double, 7> plan_interp_start_q = initial_robot_snapshot.q;
+    std::array<double, 7> plan_interp_goal_q = initial_robot_snapshot.q;
+    uint64_t plan_interp_timestamp_ns = initial_plan.target_timestamp_ns;
+    uint64_t plan_interp_start_time_ns = initial_plan.target_timestamp_ns;
+
     robot.control([&](const franka::RobotState& state, franka::Duration period) -> franka::JointPositions {
       const uint64_t now_ns = MonotonicNowNs();
       const RobotSnapshot robot_snapshot = ToSnapshot(state);
@@ -469,13 +533,32 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       const bool apply_motion = config_.allow_motion && planned.teleop_active && planned.target_fresh &&
                                 planned.control_mode != ControlMode::kHold;
 
+      if (planned.target_timestamp_ns != plan_interp_timestamp_ns) {
+        plan_interp_start_q = state.q_d;
+        plan_interp_goal_q = planned.target_q;
+        plan_interp_timestamp_ns = planned.target_timestamp_ns;
+        plan_interp_start_time_ns = now_ns;
+      }
+      if (!apply_motion) {
+        plan_interp_start_q = state.q_d;
+        plan_interp_goal_q = state.q_d;
+        plan_interp_start_time_ns = now_ns;
+      }
+
       std::array<double, 7> q_cmd = state.q_d;
       if (apply_motion) {
         const double dt = std::max(period.toSec(), 1e-6);
         const double max_step = std::min(config_.ik.max_joint_step_rad,
                                          config_.ik.max_joint_velocity_radps * dt);
+        const double interp_horizon_s = 1.0 / std::max(config_.teleop.planner_rate_hz, 1.0);
+        const uint64_t elapsed_ns =
+            now_ns > plan_interp_start_time_ns ? (now_ns - plan_interp_start_time_ns) : 0;
+        const double interp_alpha = std::clamp(
+            static_cast<double>(elapsed_ns) * 1e-9 / std::max(interp_horizon_s, 1e-6), 0.0, 1.0);
         for (size_t i = 0; i < 7; ++i) {
-          const double raw_delta = planned.target_q[i] - state.q_d[i];
+          const double q_interp =
+              plan_interp_start_q[i] + interp_alpha * (plan_interp_goal_q[i] - plan_interp_start_q[i]);
+          const double raw_delta = q_interp - state.q_d[i];
           q_cmd[i] = state.q_d[i] + std::clamp(raw_delta, -max_step, max_step);
         }
       }

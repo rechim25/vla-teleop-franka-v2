@@ -67,6 +67,10 @@ bool LoadSafetyConfig(const std::string& path, AppConfig* config, std::string* e
     *error = "Missing 'safety' map in " + path;
     return false;
   }
+  ReadScalar(safety, "max_translation_speed_mps", &config->bridge.safety.max_translation_speed_mps);
+  ReadScalar(safety, "max_rotation_speed_rps", &config->bridge.safety.max_rotation_speed_rps);
+  ReadScalar(safety, "max_step_translation_m", &config->bridge.safety.max_step_translation_m);
+  ReadScalar(safety, "max_step_rotation_rad", &config->bridge.safety.max_step_rotation_rad);
   ReadScalar(safety, "packet_timeout_s", &config->bridge.safety.packet_timeout_s);
   ReadScalar(safety, "jump_reject_translation_m", &config->bridge.safety.jump_reject_translation_m);
   ReadScalar(safety, "jump_reject_rotation_rad", &config->bridge.safety.jump_reject_rotation_rad);
@@ -92,7 +96,15 @@ bool LoadTeleopConfig(const std::string& path, AppConfig* config, std::string* e
   ReadScalar(teleop, "dry_run", &config->dry_run);
   ReadScalar(teleop, "scale_factor", &config->bridge.teleop.scale_factor);
   ReadScalar(teleop, "control_trigger_threshold", &config->bridge.teleop.control_trigger_threshold);
+  ReadScalar(teleop,
+             "control_trigger_release_threshold",
+             &config->bridge.teleop.control_trigger_release_threshold);
   ReadScalar(teleop, "planner_rate_hz", &config->bridge.teleop.planner_rate_hz);
+  ReadScalar(teleop, "target_pose_filter_alpha", &config->bridge.teleop.target_pose_filter_alpha);
+  ReadScalar(teleop, "target_position_deadband_m", &config->bridge.teleop.target_position_deadband_m);
+  ReadScalar(teleop,
+             "target_orientation_deadband_rad",
+             &config->bridge.teleop.target_orientation_deadband_rad);
   ReadArray(teleop, "start_joint_positions_rad", &config->bridge.teleop.start_joint_positions_rad);
 
   std::string control_mode;
@@ -107,10 +119,18 @@ bool LoadTeleopConfig(const std::string& path, AppConfig* config, std::string* e
   if (const YAML::Node ik = teleop["ik"]; ik && ik.IsMap()) {
     ReadScalar(ik, "damping", &config->bridge.ik.damping);
     ReadScalar(ik, "nullspace_gain", &config->bridge.ik.nullspace_gain);
+    ReadScalar(ik,
+               "nullspace_activation_position_error_m",
+               &config->bridge.ik.nullspace_activation_position_error_m);
+    ReadScalar(ik,
+               "nullspace_activation_orientation_error_rad",
+               &config->bridge.ik.nullspace_activation_orientation_error_rad);
     ReadScalar(ik, "max_joint_velocity_radps", &config->bridge.ik.max_joint_velocity_radps);
     ReadScalar(ik, "max_joint_step_rad", &config->bridge.ik.max_joint_step_rad);
     ReadScalar(ik, "position_gain", &config->bridge.ik.position_gain);
     ReadScalar(ik, "orientation_gain", &config->bridge.ik.orientation_gain);
+    ReadScalar(ik, "position_error_deadband_m", &config->bridge.ik.position_error_deadband_m);
+    ReadScalar(ik, "orientation_error_deadband_rad", &config->bridge.ik.orientation_error_deadband_rad);
     ReadScalar(ik, "manipulability_threshold", &config->bridge.ik.manipulability_threshold);
     ReadScalar(ik, "singularity_damping_gain", &config->bridge.ik.singularity_damping_gain);
   }
@@ -173,6 +193,44 @@ bool LoadAppConfig(const std::string& config_dir, AppConfig* config, std::string
   if (config->bridge.teleop.control_trigger_threshold < 0.0 ||
       config->bridge.teleop.control_trigger_threshold > 1.0) {
     *error = "teleop.control_trigger_threshold must be in [0, 1]";
+    return false;
+  }
+  if (config->bridge.teleop.control_trigger_release_threshold < 0.0 ||
+      config->bridge.teleop.control_trigger_release_threshold > 1.0) {
+    *error = "teleop.control_trigger_release_threshold must be in [0, 1]";
+    return false;
+  }
+  if (config->bridge.teleop.control_trigger_release_threshold >
+      config->bridge.teleop.control_trigger_threshold) {
+    *error =
+        "teleop.control_trigger_release_threshold must be <= teleop.control_trigger_threshold";
+    return false;
+  }
+  if (config->bridge.teleop.target_pose_filter_alpha <= 0.0 ||
+      config->bridge.teleop.target_pose_filter_alpha > 1.0) {
+    *error = "teleop.target_pose_filter_alpha must be in (0, 1]";
+    return false;
+  }
+  if (config->bridge.teleop.target_position_deadband_m < 0.0 ||
+      config->bridge.teleop.target_orientation_deadband_rad < 0.0) {
+    *error = "teleop target deadbands must be >= 0";
+    return false;
+  }
+  if (config->bridge.safety.max_translation_speed_mps <= 0.0 ||
+      config->bridge.safety.max_rotation_speed_rps <= 0.0 ||
+      config->bridge.safety.max_step_translation_m <= 0.0 ||
+      config->bridge.safety.max_step_rotation_rad <= 0.0) {
+    *error = "safety speed/step limits must be > 0";
+    return false;
+  }
+  if (config->bridge.ik.nullspace_activation_position_error_m <= 0.0 ||
+      config->bridge.ik.nullspace_activation_orientation_error_rad <= 0.0) {
+    *error = "ik nullspace activation thresholds must be > 0";
+    return false;
+  }
+  if (config->bridge.ik.position_error_deadband_m < 0.0 ||
+      config->bridge.ik.orientation_error_deadband_rad < 0.0) {
+    *error = "ik error deadbands must be >= 0";
     return false;
   }
   if (config->bridge.gripper.min_width_m < 0.0 ||

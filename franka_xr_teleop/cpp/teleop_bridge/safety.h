@@ -13,6 +13,7 @@ class SafetyFilter {
   bool FilterTargetPose(const Pose& current_pose,
                         const Pose& desired_pose,
                         double packet_age_s,
+                        double control_dt_s,
                         FaultFlags* faults,
                         Pose* safe_pose) const;
 
