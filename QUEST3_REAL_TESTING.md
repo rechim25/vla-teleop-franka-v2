@@ -1,3 +1,116 @@
+# Real Robot Quick Start (Build + Run)
+
+## 0) Preconditions
+
+- Franka FCI is enabled in Desk.
+- PC is on PREEMPT_RT kernel (for example `uname -r` contains `rt`).
+- Quest USB/ADB path is working (see [QUEST3_CONNECTION.md](/home/radu/vla-teleop-franka-v2/QUEST3_CONNECTION.md)).
+- XRoboToolkit PC service is installed at `/opt/apps/roboticsservice`.
+
+## 1) Build bridge
+
+```bash
+cd /home/radu/vla-teleop-franka-v2/franka_xr_teleop
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DXROBOTICS_SERVICE_ROOT=/opt/apps/roboticsservice
+cmake --build build -j"$(nproc)"
+```
+
+## 2) Start Quest + XR service path
+
+1. Verify Quest is visible:
+
+```bash
+adb devices -l
+```
+
+2. Set ADB reverse tunnel:
+
+```bash
+adb reverse --remove-all
+adb reverse tcp:63901 tcp:63901
+adb reverse --list
+```
+
+3. In Quest app, connect to `127.0.0.1`.
+
+4. Start XRoboToolkit PC service:
+
+```bash
+/opt/apps/roboticsservice/run3D.sh
+```
+
+## 3) Run modes
+
+Dry-run (input path only, no robot motion):
+
+```bash
+cd /home/radu/vla-teleop-franka-v2/franka_xr_teleop
+./build/cpp/teleop_bridge/franka_xr_teleop_bridge --dry-run
+```
+
+Hold-only (robot connected, no arm motion):
+
+```bash
+./build/cpp/teleop_bridge/franka_xr_teleop_bridge \
+  --robot-ip 192.168.2.200 \
+  --obs-port 28081 \
+  --no-motion
+```
+
+Live teleop:
+
+```bash
+./build/cpp/teleop_bridge/franka_xr_teleop_bridge \
+  --robot-ip 192.168.2.200 \
+  --obs-port 28081
+```
+
+## 4) If you see realtime scheduling error
+
+Symptom:
+
+```text
+Franka exception: libfranka: unable to set realtime scheduling: Operation not permitted
+```
+
+Immediate fix (recommended):
+
+```bash
+cd /home/radu/vla-teleop-franka-v2/franka_xr_teleop
+sudo setcap cap_sys_nice,cap_ipc_lock+ep ./build/cpp/teleop_bridge/franka_xr_teleop_bridge
+getcap ./build/cpp/teleop_bridge/franka_xr_teleop_bridge
+```
+
+Expected capability output includes:
+
+```text
+cap_sys_nice,cap_ipc_lock=ep
+```
+
+Then run bridge again.
+
+Persistent user-side RT setup:
+
+```bash
+sudo groupadd -f realtime
+sudo usermod -aG realtime $USER
+```
+
+Log out/in (or reboot), then verify:
+
+```bash
+ulimit -r
+ulimit -l
+```
+
+`ulimit -r` should be non-zero (typically `99`).
+
+Important:
+- Rebuilding the binary removes `setcap`; run the `setcap` command again after each rebuild.
+
+---
+
 # Architecture Overview
 
 You now have a 4-stage pipeline:
