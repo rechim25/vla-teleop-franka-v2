@@ -108,7 +108,9 @@ bool LoadTeleopConfig(const std::string& path, AppConfig* config, std::string* e
     ReadScalar(ik, "damping", &config->bridge.ik.damping);
     ReadScalar(ik, "nullspace_gain", &config->bridge.ik.nullspace_gain);
     ReadScalar(ik, "max_joint_velocity_radps", &config->bridge.ik.max_joint_velocity_radps);
+    ReadScalar(ik, "max_joint_acceleration_radps2", &config->bridge.ik.max_joint_acceleration_radps2);
     ReadScalar(ik, "max_joint_step_rad", &config->bridge.ik.max_joint_step_rad);
+    ReadScalar(ik, "target_smoothing_alpha", &config->bridge.ik.target_smoothing_alpha);
     ReadScalar(ik, "position_gain", &config->bridge.ik.position_gain);
     ReadScalar(ik, "orientation_gain", &config->bridge.ik.orientation_gain);
     ReadScalar(ik, "manipulability_threshold", &config->bridge.ik.manipulability_threshold);
@@ -178,6 +180,15 @@ bool LoadAppConfig(const std::string& config_dir, AppConfig* config, std::string
   if (config->bridge.gripper.min_width_m < 0.0 ||
       config->bridge.gripper.max_width_m < config->bridge.gripper.min_width_m) {
     *error = "Invalid gripper width range";
+    return false;
+  }
+  if (config->bridge.ik.max_joint_acceleration_radps2 <= 0.0) {
+    *error = "teleop.ik.max_joint_acceleration_radps2 must be > 0";
+    return false;
+  }
+  if (config->bridge.ik.target_smoothing_alpha < 0.0 ||
+      config->bridge.ik.target_smoothing_alpha > 1.0) {
+    *error = "teleop.ik.target_smoothing_alpha must be in [0, 1]";
     return false;
   }
   return true;

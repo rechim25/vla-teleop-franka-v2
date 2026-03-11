@@ -155,7 +155,9 @@ struct IkConfig {
   double damping = 0.05;
   double nullspace_gain = 0.15;
   double max_joint_velocity_radps = 0.35;
+  double max_joint_acceleration_radps2 = 1.5;
   double max_joint_step_rad = 0.008;
+  double target_smoothing_alpha = 0.25;
   double position_gain = 3.0;
   double orientation_gain = 2.0;
   double manipulability_threshold = 0.05;

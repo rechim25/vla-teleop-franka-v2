@@ -13,7 +13,9 @@ teleop:
     damping: 0.05
     nullspace_gain: 0.15
     max_joint_velocity_radps: 0.35
+    max_joint_acceleration_radps2: 1.5
     max_joint_step_rad: 0.008
+    target_smoothing_alpha: 0.25
     position_gain: 3.0
     orientation_gain: 2.0
     manipulability_threshold: 0.05

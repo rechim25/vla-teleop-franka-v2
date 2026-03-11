@@ -203,6 +203,66 @@ bool SolveIkStep(const franka::Model& model,
   return true;
 }
 
+class JointTargetSmoother {
+ public:
+  explicit JointTargetSmoother(const TeleopBridgeConfig& config)
+      : dt_(1.0 / std::max(config.teleop.planner_rate_hz, 1.0)),
+        max_velocity_(std::max(config.ik.max_joint_velocity_radps, 1e-6)),
+        max_acceleration_(std::max(config.ik.max_joint_acceleration_radps2, 1e-6)),
+        max_step_(std::max(0.0, config.ik.max_joint_step_rad)),
+        alpha_(std::clamp(config.ik.target_smoothing_alpha, 0.0, 1.0)) {}
+
+  void Reset() {
+    initialized_ = false;
+    prev_q_.fill(0.0);
+    prev_dq_.fill(0.0);
+  }
+
+  std::array<double, 7> Update(const std::array<double, 7>& raw_target_q,
+                               const std::array<double, 7>& reference_q) {
+    if (!initialized_) {
+      prev_q_ = reference_q;
+      prev_dq_.fill(0.0);
+      initialized_ = true;
+    }
+
+    std::array<double, 7> q_out = prev_q_;
+    std::array<double, 7> dq_out = prev_dq_;
+
+    const double max_step_from_velocity = max_velocity_ * dt_;
+    const double max_step = max_step_ > 0.0 ? std::min(max_step_, max_step_from_velocity)
+                                            : max_step_from_velocity;
+    const double max_delta_velocity = max_acceleration_ * dt_;
+
+    for (size_t i = 0; i < 7; ++i) {
+      const double raw_vel = (raw_target_q[i] - prev_q_[i]) / dt_;
+      const double blended_vel = alpha_ * raw_vel + (1.0 - alpha_) * prev_dq_[i];
+      const double velocity_limited = std::clamp(blended_vel, -max_velocity_, max_velocity_);
+      const double accel_limited = prev_dq_[i] +
+                                   std::clamp(velocity_limited - prev_dq_[i],
+                                              -max_delta_velocity,
+                                              max_delta_velocity);
+      const double step = std::clamp(accel_limited * dt_, -max_step, max_step);
+      q_out[i] = prev_q_[i] + step;
+      dq_out[i] = step / dt_;
+    }
+
+    prev_q_ = q_out;
+    prev_dq_ = dq_out;
+    return q_out;
+  }
+
+ private:
+  double dt_ = 0.01;
+  double max_velocity_ = 0.35;
+  double max_acceleration_ = 1.5;
+  double max_step_ = 0.008;
+  double alpha_ = 0.25;
+  bool initialized_ = false;
+  std::array<double, 7> prev_q_{};
+  std::array<double, 7> prev_dq_{};
+};
+
 void PlannerLoop(const TeleopBridgeConfig& config,
                  const franka::Model& model,
                  const LatestCommandBuffer* command_buffer,
@@ -217,6 +277,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
     SafetyFilter safety(config.safety);
     TeleopMapper mapper(config);
     TeleopStateMachine state_machine;
+    JointTargetSmoother smoother(config);
 
     while (!stop_requested->load(std::memory_order_acquire)) {
       const uint64_t now_ns = MonotonicNowNs();
@@ -259,6 +320,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
 
       if (!planned.teleop_active) {
         mapper.Reset();
+        smoother.Reset();
         planned_target_buffer->Publish(planned);
         std::this_thread::sleep_for(sleep_period);
         continue;
@@ -276,6 +338,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
                                    &requested_action);
       planned.requested_action = requested_action;
       if (!has_target) {
+        smoother.Reset();
         planned.control_mode = ControlMode::kHold;
         planned_target_buffer->Publish(planned);
         std::this_thread::sleep_for(sleep_period);
@@ -291,6 +354,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
           // Re-anchor immediately so long motions recover without deadman release/re-press.
           mapper.Reset();
         }
+        smoother.Reset();
         planned.control_mode = ControlMode::kHold;
         planned_target_buffer->Publish(planned);
         std::this_thread::sleep_for(sleep_period);
@@ -307,13 +371,14 @@ void PlannerLoop(const TeleopBridgeConfig& config,
                        &q_target,
                        &manipulability)) {
         planned.faults.ik_rejected = true;
+        smoother.Reset();
         planned.control_mode = ControlMode::kHold;
         planned_target_buffer->Publish(planned);
         std::this_thread::sleep_for(sleep_period);
         continue;
       }
 
-      planned.target_q = q_target;
+      planned.target_q = smoother.Update(q_target, robot.q);
       planned.manipulability = manipulability;
       planned.target_fresh = true;
       planned_target_buffer->Publish(planned);
