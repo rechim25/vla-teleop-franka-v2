@@ -68,6 +68,10 @@ bool LoadSafetyConfig(const std::string& path, AppConfig* config, std::string* e
     return false;
   }
   ReadScalar(safety, "packet_timeout_s", &config->bridge.safety.packet_timeout_s);
+  ReadScalar(safety, "max_translation_speed_mps", &config->bridge.safety.max_translation_speed_mps);
+  ReadScalar(safety, "max_rotation_speed_rps", &config->bridge.safety.max_rotation_speed_rps);
+  ReadScalar(safety, "max_step_translation_m", &config->bridge.safety.max_step_translation_m);
+  ReadScalar(safety, "max_step_rotation_rad", &config->bridge.safety.max_step_rotation_rad);
   ReadScalar(safety, "jump_reject_translation_m", &config->bridge.safety.jump_reject_translation_m);
   ReadScalar(safety, "jump_reject_rotation_rad", &config->bridge.safety.jump_reject_rotation_rad);
   ReadArray(safety, "workspace_min_xyz", &config->bridge.safety.workspace_min);
@@ -93,6 +97,10 @@ bool LoadTeleopConfig(const std::string& path, AppConfig* config, std::string* e
   ReadScalar(teleop, "scale_factor", &config->bridge.teleop.scale_factor);
   ReadScalar(teleop, "control_trigger_threshold", &config->bridge.teleop.control_trigger_threshold);
   ReadScalar(teleop, "planner_rate_hz", &config->bridge.teleop.planner_rate_hz);
+  ReadScalar(teleop, "target_timeout_s", &config->bridge.teleop.target_timeout_s);
+  ReadScalar(teleop, "translation_deadband_m", &config->bridge.teleop.translation_deadband_m);
+  ReadScalar(teleop, "rotation_deadband_rad", &config->bridge.teleop.rotation_deadband_rad);
+  ReadScalar(teleop, "move_to_home_on_startup", &config->bridge.teleop.move_to_home_on_startup);
   ReadArray(teleop, "start_joint_positions_rad", &config->bridge.teleop.start_joint_positions_rad);
 
   std::string control_mode;
@@ -127,6 +135,27 @@ bool LoadTeleopConfig(const std::string& path, AppConfig* config, std::string* e
   return true;
 }
 
+bool LoadRecordingConfig(const std::string& path, AppConfig* config, std::string* error) {
+  const YAML::Node root = YAML::LoadFile(path);
+  const YAML::Node recording = root["recording"];
+  if (!recording) {
+    return true;
+  }
+  if (!recording.IsMap()) {
+    *error = "Invalid 'recording' map in " + path;
+    return false;
+  }
+
+  ReadScalar(recording, "enabled", &config->recording.enabled);
+  ReadScalar(recording, "directory", &config->recording.directory);
+  ReadScalar(recording, "flush_hz", &config->recording.flush_hz);
+  size_t max_buffer_entries = config->recording.max_buffer_entries;
+  if (ReadScalar(recording, "max_buffer_entries", &max_buffer_entries)) {
+    config->recording.max_buffer_entries = max_buffer_entries;
+  }
+  return true;
+}
+
 bool LoadXrFrameConfig(const std::string& path, AppConfig* config, std::string* error) {
   const YAML::Node root = YAML::LoadFile(path);
   const YAML::Node xr_frame = root["xr_frame"];
@@ -154,6 +183,9 @@ bool LoadAppConfig(const std::string& config_dir, AppConfig* config, std::string
     if (!LoadTeleopConfig(JoinPath(config_dir, "teleop.yaml"), config, error)) {
       return false;
     }
+    if (!LoadRecordingConfig(JoinPath(config_dir, "teleop.yaml"), config, error)) {
+      return false;
+    }
     if (!LoadXrFrameConfig(JoinPath(config_dir, "xr_frame.yaml"), config, error)) {
       return false;
     }
@@ -170,14 +202,38 @@ bool LoadAppConfig(const std::string& config_dir, AppConfig* config, std::string
     *error = "teleop.planner_rate_hz must be > 1.0";
     return false;
   }
+  if (config->bridge.teleop.target_timeout_s <= 0.0) {
+    *error = "teleop.target_timeout_s must be > 0";
+    return false;
+  }
+  if (config->bridge.teleop.translation_deadband_m < 0.0 ||
+      config->bridge.teleop.rotation_deadband_rad < 0.0) {
+    *error = "teleop translation/rotation deadband must be >= 0";
+    return false;
+  }
   if (config->bridge.teleop.control_trigger_threshold < 0.0 ||
       config->bridge.teleop.control_trigger_threshold > 1.0) {
     *error = "teleop.control_trigger_threshold must be in [0, 1]";
     return false;
   }
+  if (config->bridge.safety.max_translation_speed_mps <= 0.0 ||
+      config->bridge.safety.max_rotation_speed_rps <= 0.0 ||
+      config->bridge.safety.max_step_translation_m <= 0.0 ||
+      config->bridge.safety.max_step_rotation_rad <= 0.0) {
+    *error = "Safety max speed/step values must be > 0";
+    return false;
+  }
   if (config->bridge.gripper.min_width_m < 0.0 ||
       config->bridge.gripper.max_width_m < config->bridge.gripper.min_width_m) {
     *error = "Invalid gripper width range";
+    return false;
+  }
+  if (config->recording.flush_hz <= 0.0) {
+    *error = "recording.flush_hz must be > 0";
+    return false;
+  }
+  if (config->recording.max_buffer_entries == 0) {
+    *error = "recording.max_buffer_entries must be > 0";
     return false;
   }
   return true;

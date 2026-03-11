@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(franka_xr_teleop_bridge LANGUAGES CXX)
+include(CTest)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -119,6 +120,34 @@ if(nlohmann_json_FOUND)
   target_link_libraries(franka_xr_teleop_bridge PRIVATE nlohmann_json::nlohmann_json)
 else()
   target_include_directories(franka_xr_teleop_bridge PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
+endif()
+
+if(BUILD_TESTING)
+  add_executable(teleop_bridge_safety_mapper_test
+    tests/safety_mapper_test.cpp
+    safety.cpp
+    teleop_mapper.cpp
+  )
+  target_include_directories(teleop_bridge_safety_mapper_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(teleop_bridge_safety_mapper_test PRIVATE Eigen3::Eigen)
+  add_test(NAME teleop_bridge_safety_mapper_test COMMAND teleop_bridge_safety_mapper_test)
+
+  add_executable(teleop_bridge_config_loader_test
+    tests/config_loader_test.cpp
+    config_loader.cpp
+  )
+  target_include_directories(teleop_bridge_config_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  if(TARGET yaml-cpp)
+    target_link_libraries(teleop_bridge_config_loader_test PRIVATE yaml-cpp)
+  elseif(TARGET yaml-cpp::yaml-cpp)
+    target_link_libraries(teleop_bridge_config_loader_test PRIVATE yaml-cpp::yaml-cpp)
+  elseif(USE_PKGCONFIG_YAMLCPP)
+    target_include_directories(teleop_bridge_config_loader_test PRIVATE ${YAMLCPP_INCLUDE_DIRS})
+    target_link_directories(teleop_bridge_config_loader_test PRIVATE ${YAMLCPP_LIBRARY_DIRS})
+    target_link_libraries(teleop_bridge_config_loader_test PRIVATE ${YAMLCPP_LIBRARIES})
+    target_compile_options(teleop_bridge_config_loader_test PRIVATE ${YAMLCPP_CFLAGS_OTHER})
+  endif()
+  add_test(NAME teleop_bridge_config_loader_test COMMAND teleop_bridge_config_loader_test)
 endif()
 
 if(TARGET yaml-cpp)

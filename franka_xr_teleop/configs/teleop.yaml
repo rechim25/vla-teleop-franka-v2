@@ -4,16 +4,20 @@ teleop:
   observation_port: 28081
   allow_motion: true
   dry_run: false
-  control_mode: pose
-  scale_factor: 0.8
-  control_trigger_threshold: 0.9
+  control_mode: position
+  scale_factor: 0.4
+  control_trigger_threshold: 0.6
   planner_rate_hz: 100.0
+  target_timeout_s: 0.12
+  translation_deadband_m: 0.01
+  rotation_deadband_rad: 0.05
+  move_to_home_on_startup: false
   start_joint_positions_rad: [0.0, -0.78539816, 0.0, -2.35619449, 0.0, 1.57079633, 0.78539816]
   ik:
     damping: 0.05
-    nullspace_gain: 0.15
-    max_joint_velocity_radps: 0.35
-    max_joint_step_rad: 0.008
+    nullspace_gain: 0.0
+    max_joint_velocity_radps: 0.15
+    max_joint_step_rad: 0.003
     position_gain: 3.0
     orientation_gain: 2.0
     manipulability_threshold: 0.05
@@ -25,3 +29,9 @@ teleop:
     speed_mps: 0.05
     min_command_delta_m: 0.002
     max_command_rate_hz: 20.0
+
+recording:
+  enabled: true
+  directory: logs/franka_xr_teleop
+  flush_hz: 20.0
+  max_buffer_entries: 4096

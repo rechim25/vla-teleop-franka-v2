@@ -13,6 +13,7 @@ class TeleopMapper {
   bool ComputeTargetPose(const Pose& current_robot_pose,
                          const XRCommand& xr_cmd,
                          bool teleop_active,
+                         bool clutch_pressed,
                          ControlMode control_mode,
                          Pose* mapped_target_pose,
                          TeleopAction* requested_action);

@@ -43,6 +43,7 @@ void ConfigureConservativeBehavior(franka::Robot* robot) {
       {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}},
       {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}});
   robot->setJointImpedance({{3000.0, 3000.0, 3000.0, 2500.0, 2500.0, 2000.0, 2000.0}});
+  robot->setCartesianImpedance({{3000.0, 3000.0, 3000.0, 300.0, 300.0, 300.0}});
 }
 
 RobotSnapshot ToSnapshot(const franka::RobotState& state) {
@@ -64,7 +65,8 @@ bool RecoverRobotIfNeeded(franka::Robot* robot) {
     return true;
   }
   robot->automaticErrorRecovery();
-  return true;
+  const franka::RobotState recovered_state = robot->readOnce();
+  return recovered_state.robot_mode != franka::RobotMode::kReflex;
 }
 
 bool MoveToHomePose(franka::Robot* robot,
@@ -118,9 +120,9 @@ Eigen::Matrix<double, 6, 7> JacobianToEigen(const std::array<double, 42>& jacobi
   return Eigen::Map<const Eigen::Matrix<double, 6, 7, Eigen::ColMajor>>(jacobian_col_major.data());
 }
 
-double ComputeManipulability(const Eigen::Matrix<double, 6, 7>& jacobian) {
-  Eigen::JacobiSVD<Eigen::Matrix<double, 6, 7>> svd(
-      jacobian, Eigen::ComputeThinU | Eigen::ComputeThinV);
+template <typename MatrixType>
+double ComputeManipulability(const MatrixType& jacobian) {
+  Eigen::JacobiSVD<MatrixType> svd(jacobian, Eigen::ComputeThinU | Eigen::ComputeThinV);
   const Eigen::VectorXd singular_values = svd.singularValues();
   double product = 1.0;
   for (int i = 0; i < singular_values.size(); ++i) {
@@ -144,47 +146,81 @@ bool SolveIkStep(const franka::Model& model,
 
   const Eigen::Matrix<double, 6, 7> jacobian = JacobianToEigen(
       model.zeroJacobian(franka::Frame::kEndEffector, snapshot.q, snapshot.F_T_EE, snapshot.EE_T_K));
-  Eigen::Matrix<double, 6, 7> jacobian_task = jacobian;
-
-  Eigen::Matrix<double, 6, 1> task_error = Eigen::Matrix<double, 6, 1>::Zero();
   const Eigen::Vector3d position_error = ToEigen(desired_pose.p) - ToEigen(snapshot.tcp_pose.p);
-  task_error.head<3>() = config.ik.position_gain * position_error;
-
-  if (control_mode == ControlMode::kPose) {
-    const Eigen::Vector3d rotation_error =
-        QuaternionErrorAngleAxis(ToEigenQuat(snapshot.tcp_pose.q), ToEigenQuat(desired_pose.q));
-    task_error.tail<3>() = config.ik.orientation_gain * rotation_error;
-  } else {
-    jacobian_task.bottomRows<3>().setZero();
-  }
-
-  *manipulability = ComputeManipulability(jacobian_task);
-
-  double lambda = config.ik.damping;
-  if (*manipulability < config.ik.manipulability_threshold) {
-    lambda +=
-        (config.ik.manipulability_threshold - *manipulability) * config.ik.singularity_damping_gain;
-  }
-
-  const Eigen::Matrix<double, 6, 6> a_matrix =
-      jacobian_task * jacobian_task.transpose() +
-      (lambda * lambda) * Eigen::Matrix<double, 6, 6>::Identity();
-  const Eigen::LDLT<Eigen::Matrix<double, 6, 6>> a_ldlt(a_matrix);
-  if (a_ldlt.info() != Eigen::Success) {
-    return false;
-  }
+  const bool small_position_error = position_error.norm() < config.teleop.translation_deadband_m;
 
   const Eigen::Matrix<double, 7, 1> q_current =
       Eigen::Map<const Eigen::Matrix<double, 7, 1>>(snapshot.q.data());
   const Eigen::Matrix<double, 7, 1> q_home =
       Eigen::Map<const Eigen::Matrix<double, 7, 1>>(config.teleop.start_joint_positions_rad.data());
-  const Eigen::Matrix<double, 7, 1> dq_primary =
-      jacobian_task.transpose() * a_ldlt.solve(task_error);
-  const Eigen::Matrix<double, 7, 7> nullspace_projector =
-      Eigen::Matrix<double, 7, 7>::Identity() -
-      jacobian_task.transpose() * a_ldlt.solve(jacobian_task);
-  Eigen::Matrix<double, 7, 1> dq =
-      dq_primary + config.ik.nullspace_gain * nullspace_projector * (q_home - q_current);
+  Eigen::Matrix<double, 7, 1> dq = Eigen::Matrix<double, 7, 1>::Zero();
+
+  if (control_mode == ControlMode::kPose) {
+    Eigen::Matrix<double, 6, 1> task_error = Eigen::Matrix<double, 6, 1>::Zero();
+    task_error.head<3>() = config.ik.position_gain * position_error;
+
+    const Eigen::Vector3d rotation_error =
+        QuaternionErrorAngleAxis(ToEigenQuat(snapshot.tcp_pose.q), ToEigenQuat(desired_pose.q));
+    task_error.tail<3>() = config.ik.orientation_gain * rotation_error;
+    if (small_position_error && rotation_error.norm() < config.teleop.rotation_deadband_rad) {
+      *target_q = snapshot.q;
+      *manipulability = 0.0;
+      return true;
+    }
+
+    *manipulability = ComputeManipulability(jacobian);
+    double lambda = config.ik.damping;
+    if (*manipulability < config.ik.manipulability_threshold) {
+      lambda +=
+          (config.ik.manipulability_threshold - *manipulability) * config.ik.singularity_damping_gain;
+    }
+
+    const Eigen::Matrix<double, 6, 6> a_matrix =
+        jacobian * jacobian.transpose() +
+        (lambda * lambda) * Eigen::Matrix<double, 6, 6>::Identity();
+    const Eigen::LDLT<Eigen::Matrix<double, 6, 6>> a_ldlt(a_matrix);
+    if (a_ldlt.info() != Eigen::Success) {
+      return false;
+    }
+
+    const Eigen::Matrix<double, 7, 1> dq_primary =
+        jacobian.transpose() * a_ldlt.solve(task_error);
+    const Eigen::Matrix<double, 7, 7> nullspace_projector =
+        Eigen::Matrix<double, 7, 7>::Identity() -
+        jacobian.transpose() * a_ldlt.solve(jacobian);
+    dq = dq_primary + config.ik.nullspace_gain * nullspace_projector * (q_home - q_current);
+  } else {
+    if (small_position_error) {
+      *target_q = snapshot.q;
+      *manipulability = 0.0;
+      return true;
+    }
+
+    const Eigen::Matrix<double, 3, 7> jacobian_position = jacobian.topRows<3>();
+    const Eigen::Matrix<double, 3, 1> task_error = config.ik.position_gain * position_error;
+
+    *manipulability = ComputeManipulability(jacobian_position);
+    double lambda = config.ik.damping;
+    if (*manipulability < config.ik.manipulability_threshold) {
+      lambda +=
+          (config.ik.manipulability_threshold - *manipulability) * config.ik.singularity_damping_gain;
+    }
+
+    const Eigen::Matrix<double, 3, 3> a_matrix =
+        jacobian_position * jacobian_position.transpose() +
+        (lambda * lambda) * Eigen::Matrix<double, 3, 3>::Identity();
+    const Eigen::LDLT<Eigen::Matrix<double, 3, 3>> a_ldlt(a_matrix);
+    if (a_ldlt.info() != Eigen::Success) {
+      return false;
+    }
+
+    const Eigen::Matrix<double, 7, 1> dq_primary =
+        jacobian_position.transpose() * a_ldlt.solve(task_error);
+    const Eigen::Matrix<double, 7, 7> nullspace_projector =
+        Eigen::Matrix<double, 7, 7>::Identity() -
+        jacobian_position.transpose() * a_ldlt.solve(jacobian_position);
+    dq = dq_primary + config.ik.nullspace_gain * nullspace_projector * (q_home - q_current);
+  }
 
   const double dt = 1.0 / config.teleop.planner_rate_hz;
   std::array<double, 7> q_next = snapshot.q;
@@ -213,6 +249,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
   try {
     const auto sleep_period =
         std::chrono::microseconds(static_cast<int64_t>(1e6 / config.teleop.planner_rate_hz));
+    const double planner_dt_s = 1.0 / config.teleop.planner_rate_hz;
 
     SafetyFilter safety(config.safety);
     TeleopMapper mapper(config);
@@ -264,6 +301,23 @@ void PlannerLoop(const TeleopBridgeConfig& config,
         continue;
       }
 
+      const bool clutch_pressed = xr_cmd.button_b;
+      if (clutch_pressed) {
+        Pose clutch_anchor_pose{};
+        TeleopAction clutch_action{};
+        (void)mapper.ComputeTargetPose(robot.tcp_pose,
+                                       xr_cmd,
+                                       true,
+                                       true,
+                                       config.teleop.control_mode,
+                                       &clutch_anchor_pose,
+                                       &clutch_action);
+        planned.control_mode = ControlMode::kHold;
+        planned_target_buffer->Publish(planned);
+        std::this_thread::sleep_for(sleep_period);
+        continue;
+      }
+
       planned.control_mode = config.teleop.control_mode;
       Pose desired_pose = robot.tcp_pose;
       TeleopAction requested_action{};
@@ -271,6 +325,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
           mapper.ComputeTargetPose(robot.tcp_pose,
                                    xr_cmd,
                                    true,
+                                   false,
                                    planned.control_mode,
                                    &desired_pose,
                                    &requested_action);
@@ -284,7 +339,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
 
       Pose safe_pose{};
       const bool safe_target = safety.FilterTargetPose(
-          robot.tcp_pose, desired_pose, packet_age_s, &planned.faults, &safe_pose);
+          robot.tcp_pose, desired_pose, packet_age_s, planner_dt_s, &planned.faults, &safe_pose);
       planned.desired_tcp_pose = safe_pose;
       if (!safe_target) {
         if (planned.faults.jump_rejected) {
@@ -419,9 +474,11 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       std::cerr << "Failed to recover robot from reflex mode.\n";
       return 5;
     }
-    if (!MoveToHomePose(&robot, config_.teleop.start_joint_positions_rad, stop_requested)) {
-      std::cerr << "Home move interrupted.\n";
-      return 6;
+    if (config_.teleop.move_to_home_on_startup) {
+      if (!MoveToHomePose(&robot, config_.teleop.start_joint_positions_rad, stop_requested)) {
+        std::cerr << "Home move interrupted.\n";
+        return 6;
+      }
     }
 
     franka::Model model = robot.loadModel();
@@ -460,23 +517,32 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
                                    stop_requested);
     }
 
+    Pose previous_observed_pose{};
+    bool have_previous_observed_pose = false;
     robot.control([&](const franka::RobotState& state, franka::Duration period) -> franka::JointPositions {
       const uint64_t now_ns = MonotonicNowNs();
       const RobotSnapshot robot_snapshot = ToSnapshot(state);
       robot_state_buffer.Publish(robot_snapshot);
 
       const PlannedTarget planned = planned_target_buffer.ReadLatest();
+      const uint64_t target_age_ns =
+          now_ns > planned.target_timestamp_ns ? (now_ns - planned.target_timestamp_ns) : 0;
+      const bool target_not_stale =
+          static_cast<double>(target_age_ns) * 1e-9 <= config_.teleop.target_timeout_s;
       const bool apply_motion = config_.allow_motion && planned.teleop_active && planned.target_fresh &&
-                                planned.control_mode != ControlMode::kHold;
+                                planned.control_mode != ControlMode::kHold && target_not_stale;
 
       std::array<double, 7> q_cmd = state.q_d;
+      if (!apply_motion) {
+        q_cmd = state.q;
+      }
       if (apply_motion) {
         const double dt = std::max(period.toSec(), 1e-6);
         const double max_step = std::min(config_.ik.max_joint_step_rad,
                                          config_.ik.max_joint_velocity_radps * dt);
         for (size_t i = 0; i < 7; ++i) {
-          const double raw_delta = planned.target_q[i] - state.q_d[i];
-          q_cmd[i] = state.q_d[i] + std::clamp(raw_delta, -max_step, max_step);
+          const double raw_delta = planned.target_q[i] - state.q[i];
+          q_cmd[i] = state.q[i] + std::clamp(raw_delta, -max_step, max_step);
         }
       }
 
@@ -486,12 +552,18 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       obs.dq = state.dq;
       obs.tcp_pose = MatrixToPose(state.O_T_EE);
       obs.gripper_width = measured_gripper_width_m.load(std::memory_order_acquire);
-      obs.executed_action = planned.requested_action;
-      obs.control_mode = planned.teleop_active ? planned.control_mode : ControlMode::kHold;
+      if (!have_previous_observed_pose) {
+        obs.executed_action = DescribeAction(obs.tcp_pose, obs.tcp_pose, planned.requested_action.gripper_command);
+        have_previous_observed_pose = true;
+      } else {
+        obs.executed_action =
+            DescribeAction(previous_observed_pose, obs.tcp_pose, planned.requested_action.gripper_command);
+      }
+      previous_observed_pose = obs.tcp_pose;
+      obs.control_mode = apply_motion ? planned.control_mode : ControlMode::kHold;
       obs.teleop_state = planned.teleop_state;
       obs.packet_age_ns = planned.packet_age_ns;
-      obs.target_age_ns =
-          now_ns > planned.target_timestamp_ns ? (now_ns - planned.target_timestamp_ns) : 0;
+      obs.target_age_ns = target_age_ns;
       obs.target_fresh = planned.target_fresh;
       obs.teleop_active = planned.teleop_active;
       obs.target_manipulability = planned.manipulability;
@@ -511,6 +583,11 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
   } catch (const franka::ControlException& e) {
     join_threads();
     std::cerr << "Franka control exception: " << e.what() << "\n";
+    if (!e.log.empty()) {
+      const franka::RobotState& last_state = e.log.back().state;
+      std::cerr << "Triggered current_errors: " << last_state.current_errors << "\n";
+      std::cerr << "Triggered last_motion_errors: " << last_state.last_motion_errors << "\n";
+    }
     return 2;
   } catch (const franka::Exception& e) {
     join_threads();

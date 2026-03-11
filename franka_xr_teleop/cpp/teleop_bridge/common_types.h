@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -127,6 +128,10 @@ struct RobotObservation {
 
 struct SafetyLimits {
   double packet_timeout_s = 0.120;
+  double max_translation_speed_mps = 0.20;
+  double max_rotation_speed_rps = 0.80;
+  double max_step_translation_m = 0.0015;
+  double max_step_rotation_rad = 0.010;
   double jump_reject_translation_m = 0.08;
   double jump_reject_rotation_rad = 0.80;
   std::array<double, 3> workspace_min{{0.20, -0.45, 0.05}};
@@ -134,10 +139,14 @@ struct SafetyLimits {
 };
 
 struct TeleopRuntimeConfig {
-  ControlMode control_mode = ControlMode::kPose;
+  ControlMode control_mode = ControlMode::kPosition;
   double scale_factor = 0.8;
   double control_trigger_threshold = 0.9;
   double planner_rate_hz = 100.0;
+  double target_timeout_s = 0.120;
+  double translation_deadband_m = 0.003;
+  double rotation_deadband_rad = 0.03;
+  bool move_to_home_on_startup = false;
   std::array<double, 7> start_joint_positions_rad{
       {0.0, -0.7853981633974483, 0.0, -2.356194490192345, 0.0, 1.5707963267948966, 0.7853981633974483}};
 };
@@ -176,11 +185,19 @@ struct TeleopBridgeConfig {
   std::string robot_ip;
 };
 
+struct RecordingConfig {
+  bool enabled = true;
+  std::string directory = "logs/franka_xr_teleop";
+  double flush_hz = 20.0;
+  size_t max_buffer_entries = 4096;
+};
+
 struct AppConfig {
   TeleopBridgeConfig bridge{};
   std::string observation_ip = "127.0.0.1";
   uint16_t observation_port = 28081;
   bool dry_run = false;
+  RecordingConfig recording{};
 };
 
 template <typename T>

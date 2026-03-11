@@ -52,10 +52,11 @@ franka_xr_teleop/
 
 ## Input Mapping (Controller-only v1)
 
-The bridge maps the **right controller** fields from XR-Robotics state JSON to teleop semantics:
-- `primaryButton` (A): deadman (`teleop_enabled`)
-- `secondaryButton` (B): clutch (`clutch_pressed`)
+The bridge maps **right controller** fields to teleop semantics:
+- `right_grip` / `grip`: deadman (`teleop_enabled`)
+- `secondaryButton` (B): clutch/recenter while held
 - `trigger`: gripper command `[0,1]`
+- `right_axis_click`: discard active recording
 - `pose` (`x,y,z,qx,qy,qz,qw`): target position/orientation input
 
 ## Message Contract (Internal)
@@ -63,11 +64,10 @@ The bridge maps the **right controller** fields from XR-Robotics state JSON to t
 Incoming normalized command fields used by the bridge:
 - `timestamp_ns`
 - `sequence_id`
-- `teleop_enabled`
-- `clutch_pressed`
-- `target_position_xyz`
-- `target_orientation_xyzw`
-- `gripper_command`
+- `right_controller_pose`
+- `control_trigger_value`
+- `gripper_trigger_value`
+- button flags (`button_a`, `button_b`, `right_axis_click`)
 
 `timestamp_ns` is stamped on command receive using workstation monotonic time so timeout-to-hold logic is clock-safe.
 
@@ -75,6 +75,11 @@ Outgoing observation stream (UDP JSON):
 - robot state: `q`, `dq`, TCP pose, gripper width
 - executed action: cartesian delta, gripper command
 - status: control mode, teleop state, packet age, fault flags
+
+Local recording stream (JSONL):
+- toggled by `B` rising edge when deadman is not held
+- discarded by `right_axis_click`
+- each line stores observation plus XR input snapshot
 
 ## Teleop State Machine
 
@@ -121,6 +126,19 @@ Live teleop:
 ./build/cpp/teleop_bridge/franka_xr_teleop_bridge \
   --robot-ip 192.168.2.200 \
   --obs-port 28081
+```
+
+Startup behavior:
+- Default is `--skip-home` (no automatic homing motion at startup).
+- Use `--move-to-home` to explicitly run startup homing to `teleop.start_joint_positions_rad`.
+
+Force full 6-DoF orientation control:
+
+```bash
+./build/cpp/teleop_bridge/franka_xr_teleop_bridge \
+  --robot-ip 192.168.2.200 \
+  --obs-port 28081 \
+  --control-mode pose
 ```
 
 Hold-only mode (data path active, no robot motion):
