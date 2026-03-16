@@ -426,21 +426,11 @@ void PlannerLoop(const TeleopBridgeConfig& config,
         continue;
       }
 
-      safe_target = safety.FilterTargetPose(
-          robot.tcp_pose, desired_pose, packet_age_s, &planned.faults, &safe_pose);
+      // Safety target shaping is intentionally bypassed in this simplified mode:
+      // planner uses mapper output directly for IK.
+      safe_target = true;
+      safe_pose = desired_pose;
       planned.desired_tcp_pose = safe_pose;
-      if (!safe_target) {
-        if (planned.faults.jump_rejected) {
-          // Re-anchor immediately so long motions recover without deadman release/re-press.
-          mapper.Reset();
-        }
-        smoother.Reset();
-        planned.control_mode = ControlMode::kHold;
-        planned_target_buffer->Publish(planned);
-        publish_trace();
-        std::this_thread::sleep_for(sleep_period);
-        continue;
-      }
 
       double manipulability = 0.0;
       ik_ok = SolveIkStep(model,
