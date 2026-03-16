@@ -26,6 +26,7 @@
 #include "safety.h"
 #include "teleop_mapper.h"
 #include "teleop_state_machine.h"
+#include "trace_logger.h"
 
 namespace teleop {
 namespace {
@@ -129,6 +130,14 @@ double ComputeManipulability(const Eigen::Matrix<double, 6, 7>& jacobian) {
   return product;
 }
 
+Eigen::Vector3d ApplyVectorDeadband(const Eigen::Vector3d& value, double deadband) {
+  const double norm = value.norm();
+  if (norm <= deadband || norm <= 1e-12) {
+    return Eigen::Vector3d::Zero();
+  }
+  return value * ((norm - deadband) / norm);
+}
+
 bool SolveIkStep(const franka::Model& model,
                  const RobotSnapshot& snapshot,
                  const Pose& desired_pose,
@@ -147,12 +156,16 @@ bool SolveIkStep(const franka::Model& model,
   Eigen::Matrix<double, 6, 7> jacobian_task = jacobian;
 
   Eigen::Matrix<double, 6, 1> task_error = Eigen::Matrix<double, 6, 1>::Zero();
-  const Eigen::Vector3d position_error = ToEigen(desired_pose.p) - ToEigen(snapshot.tcp_pose.p);
+  const Eigen::Vector3d raw_position_error = ToEigen(desired_pose.p) - ToEigen(snapshot.tcp_pose.p);
+  const Eigen::Vector3d position_error =
+      ApplyVectorDeadband(raw_position_error, config.ik.task_translation_deadband_m);
   task_error.head<3>() = config.ik.position_gain * position_error;
 
   if (control_mode == ControlMode::kPose) {
-    const Eigen::Vector3d rotation_error =
+    const Eigen::Vector3d raw_rotation_error =
         QuaternionErrorAngleAxis(ToEigenQuat(snapshot.tcp_pose.q), ToEigenQuat(desired_pose.q));
+    const Eigen::Vector3d rotation_error =
+        ApplyVectorDeadband(raw_rotation_error, config.ik.task_rotation_deadband_rad);
     task_error.tail<3>() = config.ik.orientation_gain * rotation_error;
   } else {
     jacobian_task.bottomRows<3>().setZero();
@@ -268,19 +281,27 @@ void PlannerLoop(const TeleopBridgeConfig& config,
                  const LatestCommandBuffer* command_buffer,
                  const LatestRobotStateBuffer* robot_state_buffer,
                  LatestPlannedTargetBuffer* planned_target_buffer,
+                 TraceRecorder* trace_recorder,
+                 uint32_t trace_decimation,
                  std::atomic<double>* desired_gripper_width_m,
                  std::atomic<bool>* stop_requested) {
   try {
     const auto sleep_period =
         std::chrono::microseconds(static_cast<int64_t>(1e6 / config.teleop.planner_rate_hz));
 
-    SafetyFilter safety(config.safety);
+    SafetyFilter safety(config.safety, config.teleop.planner_rate_hz);
     TeleopMapper mapper(config);
     TeleopStateMachine state_machine;
     JointTargetSmoother smoother(config);
+    bool deadman_latched = false;
+    uint64_t planner_last_ns = 0;
+    uint64_t planner_trace_counter = 0;
+    const uint32_t planner_trace_decimation = std::max<uint32_t>(1, trace_decimation);
 
     while (!stop_requested->load(std::memory_order_acquire)) {
       const uint64_t now_ns = MonotonicNowNs();
+      const uint64_t loop_dt_ns = (planner_last_ns == 0) ? 0 : (now_ns - planner_last_ns);
+      planner_last_ns = now_ns;
       const XRCommand xr_cmd = command_buffer->ReadLatest();
       const RobotSnapshot robot = robot_state_buffer->ReadLatest();
 
@@ -292,9 +313,61 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       planned.target_gripper_width_m = MapTriggerToWidth(config.gripper, xr_cmd.gripper_trigger_value);
       planned.requested_action.gripper_command = Clamp01(xr_cmd.gripper_trigger_value);
       desired_gripper_width_m->store(planned.target_gripper_width_m, std::memory_order_release);
+      const double control_value = Clamp01(xr_cmd.control_trigger_value);
+
+      bool has_target = false;
+      bool safe_target = false;
+      bool ik_ok = false;
+      Pose desired_pose = robot.tcp_pose;
+      Pose safe_pose = robot.tcp_pose;
+      std::array<double, 7> q_target = robot.q;
+
+      auto publish_trace = [&]() {
+        if (trace_recorder == nullptr) {
+          return;
+        }
+        if ((planner_trace_counter++ % planner_trace_decimation) != 0) {
+          return;
+        }
+
+        PlannerTraceSample trace{};
+        trace.timestamp_ns = now_ns;
+        trace.loop_dt_ns = loop_dt_ns;
+        trace.xr_timestamp_ns = xr_cmd.timestamp_ns;
+        trace.xr_sequence_id = xr_cmd.sequence_id;
+        trace.packet_age_ns = planned.packet_age_ns;
+        trace.teleop_state = static_cast<int>(planned.teleop_state);
+        trace.control_mode = static_cast<int>(planned.control_mode);
+        trace.teleop_active = planned.teleop_active;
+        trace.target_fresh = planned.target_fresh;
+        trace.deadman_latched = deadman_latched;
+        trace.has_target = has_target;
+        trace.safe_target = safe_target;
+        trace.ik_ok = ik_ok;
+        trace.faults = planned.faults;
+        trace.control_trigger_value = control_value;
+        trace.xr_position = xr_cmd.right_controller_pose.p;
+        trace.desired_position = desired_pose.p;
+        trace.safe_position = safe_pose.p;
+        trace.robot_position = robot.tcp_pose.p;
+        trace.requested_delta_translation = planned.requested_action.delta_translation_m;
+        trace.requested_delta_rotation = planned.requested_action.delta_rotation_rad;
+        trace.safe_delta_translation = {
+            safe_pose.p[0] - robot.tcp_pose.p[0],
+            safe_pose.p[1] - robot.tcp_pose.p[1],
+            safe_pose.p[2] - robot.tcp_pose.p[2]};
+        trace.safe_delta_rotation =
+            ToArray3(QuaternionErrorAngleAxis(ToEigenQuat(robot.tcp_pose.q), ToEigenQuat(safe_pose.q)));
+        trace.q_robot = robot.q;
+        trace.q_raw_target = q_target;
+        trace.q_planned = planned.target_q;
+        trace.manipulability = planned.manipulability;
+        trace_recorder->PushPlanner(trace);
+      };
 
       if (robot.timestamp_ns == 0) {
         planned_target_buffer->Publish(planned);
+        publish_trace();
         std::this_thread::sleep_for(sleep_period);
         continue;
       }
@@ -305,8 +378,16 @@ void PlannerLoop(const TeleopBridgeConfig& config,
 
       StateInputs inputs{};
       inputs.xr_stream_healthy = safety.IsStreamHealthy(packet_age_s);
-      inputs.deadman_pressed =
-          (xr_cmd.control_trigger_value >= config.teleop.control_trigger_threshold);
+      if (!inputs.xr_stream_healthy) {
+        deadman_latched = false;
+      } else if (deadman_latched) {
+        if (control_value <= config.teleop.control_trigger_release_threshold) {
+          deadman_latched = false;
+        }
+      } else if (control_value >= config.teleop.control_trigger_threshold) {
+        deadman_latched = true;
+      }
+      inputs.deadman_pressed = deadman_latched;
       inputs.robot_ok = robot.robot_ok;
       inputs.fault_requested = false;
       inputs.clear_fault_requested = true;
@@ -322,31 +403,30 @@ void PlannerLoop(const TeleopBridgeConfig& config,
         mapper.Reset();
         smoother.Reset();
         planned_target_buffer->Publish(planned);
+        publish_trace();
         std::this_thread::sleep_for(sleep_period);
         continue;
       }
 
       planned.control_mode = config.teleop.control_mode;
-      Pose desired_pose = robot.tcp_pose;
       TeleopAction requested_action{};
-      const bool has_target =
-          mapper.ComputeTargetPose(robot.tcp_pose,
-                                   xr_cmd,
-                                   true,
-                                   planned.control_mode,
-                                   &desired_pose,
-                                   &requested_action);
+      has_target = mapper.ComputeTargetPose(robot.tcp_pose,
+                                            xr_cmd,
+                                            true,
+                                            planned.control_mode,
+                                            &desired_pose,
+                                            &requested_action);
       planned.requested_action = requested_action;
       if (!has_target) {
         smoother.Reset();
         planned.control_mode = ControlMode::kHold;
         planned_target_buffer->Publish(planned);
+        publish_trace();
         std::this_thread::sleep_for(sleep_period);
         continue;
       }
 
-      Pose safe_pose{};
-      const bool safe_target = safety.FilterTargetPose(
+      safe_target = safety.FilterTargetPose(
           robot.tcp_pose, desired_pose, packet_age_s, &planned.faults, &safe_pose);
       planned.desired_tcp_pose = safe_pose;
       if (!safe_target) {
@@ -357,23 +437,25 @@ void PlannerLoop(const TeleopBridgeConfig& config,
         smoother.Reset();
         planned.control_mode = ControlMode::kHold;
         planned_target_buffer->Publish(planned);
+        publish_trace();
         std::this_thread::sleep_for(sleep_period);
         continue;
       }
 
       double manipulability = 0.0;
-      std::array<double, 7> q_target = robot.q;
-      if (!SolveIkStep(model,
-                       robot,
-                       safe_pose,
-                       config,
-                       planned.control_mode,
-                       &q_target,
-                       &manipulability)) {
+      ik_ok = SolveIkStep(model,
+                          robot,
+                          safe_pose,
+                          config,
+                          planned.control_mode,
+                          &q_target,
+                          &manipulability);
+      if (!ik_ok) {
         planned.faults.ik_rejected = true;
         smoother.Reset();
         planned.control_mode = ControlMode::kHold;
         planned_target_buffer->Publish(planned);
+        publish_trace();
         std::this_thread::sleep_for(sleep_period);
         continue;
       }
@@ -382,6 +464,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       planned.manipulability = manipulability;
       planned.target_fresh = true;
       planned_target_buffer->Publish(planned);
+      publish_trace();
       std::this_thread::sleep_for(sleep_period);
     }
   } catch (const std::exception& e) {
@@ -453,6 +536,7 @@ FrankaTeleopController::FrankaTeleopController(const FrankaControllerOptions& op
 int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
   std::thread planner_thread;
   std::thread gripper_thread;
+  std::unique_ptr<TraceRecorder> trace_recorder;
   auto join_threads = [&]() {
     stop_requested->store(true, std::memory_order_release);
     if (planner_thread.joinable()) {
@@ -462,8 +546,36 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       gripper_thread.join();
     }
   };
+  auto stop_trace = [&]() {
+    if (trace_recorder == nullptr) {
+      return;
+    }
+    trace_recorder->Stop();
+    std::cout << "Trace capture stopped. output_dir=" << trace_recorder->output_dir()
+              << " dropped_planner=" << trace_recorder->dropped_planner()
+              << " dropped_rt=" << trace_recorder->dropped_rt() << "\n";
+    trace_recorder.reset();
+  };
 
   try {
+    if (options_.trace.enabled) {
+      TraceConfig trace_config{};
+      trace_config.enabled = true;
+      trace_config.output_dir = options_.trace.output_dir;
+      trace_config.planner_decimation = std::max<uint32_t>(1, options_.trace.planner_decimation);
+      trace_config.rt_decimation = std::max<uint32_t>(1, options_.trace.rt_decimation);
+
+      trace_recorder = std::make_unique<TraceRecorder>(trace_config);
+      std::string trace_error;
+      if (!trace_recorder->Start(&trace_error)) {
+        std::cerr << "Failed to start trace recorder: " << trace_error << "\n";
+        return 8;
+      }
+      std::cout << "Trace capture enabled: output_dir=" << trace_recorder->output_dir()
+                << " planner_decimation=" << trace_config.planner_decimation
+                << " rt_decimation=" << trace_config.rt_decimation << "\n";
+    }
+
     franka::Robot robot(options_.robot_ip);
     ConfigureConservativeBehavior(&robot);
 
@@ -513,6 +625,8 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
                                  command_buffer_,
                                  &robot_state_buffer,
                                  &planned_target_buffer,
+                                 trace_recorder.get(),
+                                 std::max<uint32_t>(1, options_.trace.planner_decimation),
                                  &desired_gripper_width_m,
                                  stop_requested);
 
@@ -525,8 +639,13 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
                                    stop_requested);
     }
 
+    uint64_t rt_last_ns = 0;
+    uint64_t rt_trace_counter = 0;
+    const uint32_t rt_trace_decimation = std::max<uint32_t>(1, options_.trace.rt_decimation);
     robot.control([&](const franka::RobotState& state, franka::Duration period) -> franka::JointPositions {
       const uint64_t now_ns = MonotonicNowNs();
+      const uint64_t rt_loop_dt_ns = (rt_last_ns == 0) ? 0 : (now_ns - rt_last_ns);
+      rt_last_ns = now_ns;
       const RobotSnapshot robot_snapshot = ToSnapshot(state);
       robot_state_buffer.Publish(robot_snapshot);
 
@@ -534,15 +653,32 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       const bool apply_motion = config_.allow_motion && planned.teleop_active && planned.target_fresh &&
                                 planned.control_mode != ControlMode::kHold;
 
+      const double dt = std::max(period.toSec(), 1e-6);
+      const double max_step = std::min(config_.ik.max_joint_step_rad,
+                                       config_.ik.max_joint_velocity_radps * dt);
+      const double rt_alpha = std::clamp(config_.ik.realtime_target_smoothing_alpha, 0.0, 1.0);
       std::array<double, 7> q_cmd = state.q_d;
-      if (apply_motion) {
-        const double dt = std::max(period.toSec(), 1e-6);
-        const double max_step = std::min(config_.ik.max_joint_step_rad,
-                                         config_.ik.max_joint_velocity_radps * dt);
-        for (size_t i = 0; i < 7; ++i) {
-          const double raw_delta = planned.target_q[i] - state.q_d[i];
-          q_cmd[i] = state.q_d[i] + std::clamp(raw_delta, -max_step, max_step);
+      std::array<double, 7> target_delta{};
+      std::array<double, 7> filtered_delta{};
+      std::array<double, 7> command_delta{};
+      std::array<uint8_t, 7> clamp_saturated{};
+      double max_abs_target_delta = 0.0;
+      double max_abs_filtered_delta = 0.0;
+      double max_abs_command_delta = 0.0;
+      for (size_t i = 0; i < 7; ++i) {
+        target_delta[i] = planned.target_q[i] - state.q_d[i];
+        if (apply_motion) {
+          filtered_delta[i] = rt_alpha * target_delta[i];
+          const double clamped_delta = std::clamp(filtered_delta[i], -max_step, max_step);
+          q_cmd[i] = state.q_d[i] + clamped_delta;
+          command_delta[i] = clamped_delta;
+          if (std::abs(filtered_delta[i]) > max_step + 1e-12) {
+            clamp_saturated[i] = 1;
+          }
         }
+        max_abs_target_delta = std::max(max_abs_target_delta, std::abs(target_delta[i]));
+        max_abs_filtered_delta = std::max(max_abs_filtered_delta, std::abs(filtered_delta[i]));
+        max_abs_command_delta = std::max(max_abs_command_delta, std::abs(command_delta[i]));
       }
 
       RobotObservation obs{};
@@ -564,6 +700,35 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       obs.faults.robot_not_ready = obs.faults.robot_not_ready || !robot_snapshot.robot_ok;
       observation_buffer_->Publish(obs);
 
+      if (trace_recorder != nullptr && ((rt_trace_counter++ % rt_trace_decimation) == 0)) {
+        RtTraceSample trace{};
+        trace.timestamp_ns = now_ns;
+        trace.loop_dt_ns = rt_loop_dt_ns;
+        trace.callback_period_ns = static_cast<uint64_t>(dt * 1e9);
+        trace.target_age_ns = obs.target_age_ns;
+        trace.teleop_state = static_cast<int>(obs.teleop_state);
+        trace.control_mode = static_cast<int>(obs.control_mode);
+        trace.teleop_active = obs.teleop_active;
+        trace.target_fresh = obs.target_fresh;
+        trace.apply_motion = apply_motion;
+        trace.faults = obs.faults;
+        trace.max_step = max_step;
+        trace.rt_alpha = rt_alpha;
+        trace.q = state.q;
+        trace.dq = state.dq;
+        trace.q_d = state.q_d;
+        trace.q_planned = planned.target_q;
+        trace.q_cmd = q_cmd;
+        trace.target_delta = target_delta;
+        trace.filtered_delta = filtered_delta;
+        trace.command_delta = command_delta;
+        trace.clamp_saturated = clamp_saturated;
+        trace.max_abs_target_delta = max_abs_target_delta;
+        trace.max_abs_filtered_delta = max_abs_filtered_delta;
+        trace.max_abs_command_delta = max_abs_command_delta;
+        trace_recorder->PushRt(trace);
+      }
+
       franka::JointPositions out(q_cmd);
       if (stop_requested->load(std::memory_order_acquire)) {
         return franka::MotionFinished(out);
@@ -572,21 +737,26 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
     });
 
     join_threads();
+    stop_trace();
     return 0;
   } catch (const franka::ControlException& e) {
     join_threads();
+    stop_trace();
     std::cerr << "Franka control exception: " << e.what() << "\n";
     return 2;
   } catch (const franka::Exception& e) {
     join_threads();
+    stop_trace();
     std::cerr << "Franka exception: " << e.what() << "\n";
     return 3;
   } catch (const std::exception& e) {
     join_threads();
+    stop_trace();
     std::cerr << "Std exception: " << e.what() << "\n";
     return 4;
   } catch (...) {
     join_threads();
+    stop_trace();
     std::cerr << "Unknown controller exception\n";
     return 7;
   }

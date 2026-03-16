@@ -1,14 +1,23 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <string>
 
 #include "common_types.h"
 
 namespace teleop {
 
+struct TraceOptions {
+  bool enabled = false;
+  std::string output_dir;
+  uint32_t planner_decimation = 1;
+  uint32_t rt_decimation = 1;
+};
+
 struct FrankaControllerOptions {
   std::string robot_ip;
+  TraceOptions trace{};
 };
 
 class FrankaTeleopController {

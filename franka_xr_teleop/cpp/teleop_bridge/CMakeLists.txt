@@ -108,6 +108,7 @@ add_executable(franka_xr_teleop_bridge
   franka_controller.cpp
   safety.cpp
   observation_pub.cpp
+  trace_logger.cpp
 )
 
 target_link_libraries(franka_xr_teleop_bridge PRIVATE Threads::Threads)

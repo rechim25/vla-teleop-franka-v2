@@ -1,5 +1,7 @@
 #include "teleop_mapper.h"
 
+#include <algorithm>
+
 #include <Eigen/Geometry>
 
 #include "math_utils.h"
@@ -10,6 +12,37 @@ TeleopMapper::TeleopMapper(const TeleopBridgeConfig& config) : config_(config) {
 
 void TeleopMapper::Reset() {
   anchor_initialized_ = false;
+  xr_filter_initialized_ = false;
+}
+
+std::array<double, 3> TeleopMapper::ApplyVectorDeadband(const std::array<double, 3>& value,
+                                                        double deadband) {
+  const Eigen::Vector3d v = ToEigen(value);
+  const double norm = v.norm();
+  if (norm <= deadband || norm <= 1e-12) {
+    return {0.0, 0.0, 0.0};
+  }
+  const double scaled_norm = norm - deadband;
+  return ToArray3(v * (scaled_norm / norm));
+}
+
+Pose TeleopMapper::FilterXrPose(const Pose& raw_pose) {
+  const double alpha = std::clamp(config_.teleop.xr_pose_lowpass_alpha, 0.0, 1.0);
+  if (!xr_filter_initialized_) {
+    filtered_xr_pose_ = raw_pose;
+    xr_filter_initialized_ = true;
+    return filtered_xr_pose_;
+  }
+
+  for (size_t i = 0; i < 3; ++i) {
+    filtered_xr_pose_.p[i] =
+        (1.0 - alpha) * filtered_xr_pose_.p[i] + alpha * raw_pose.p[i];
+  }
+
+  const Eigen::Quaterniond q_prev = ToEigenQuat(filtered_xr_pose_.q);
+  const Eigen::Quaterniond q_raw = ToEigenQuat(raw_pose.q);
+  filtered_xr_pose_.q = ToArrayQuat(q_prev.slerp(alpha, q_raw));
+  return filtered_xr_pose_;
 }
 
 std::array<double, 3> TeleopMapper::RotateXrVectorToRobot(const std::array<double, 3>& value) const {
@@ -33,18 +66,22 @@ bool TeleopMapper::ComputeTargetPose(const Pose& current_robot_pose,
     return false;
   }
 
+  const Pose xr_filtered_pose = FilterXrPose(xr_cmd.right_controller_pose);
+
   if (!anchor_initialized_) {
     anchor_robot_pose_ = current_robot_pose;
-    anchor_xr_pose_ = xr_cmd.right_controller_pose;
+    anchor_xr_pose_ = xr_filtered_pose;
     anchor_initialized_ = true;
     return false;
   }
 
-  const std::array<double, 3> xr_delta = {
-      xr_cmd.right_controller_pose.p[0] - anchor_xr_pose_.p[0],
-      xr_cmd.right_controller_pose.p[1] - anchor_xr_pose_.p[1],
-      xr_cmd.right_controller_pose.p[2] - anchor_xr_pose_.p[2],
+  const std::array<double, 3> xr_delta_raw = {
+      xr_filtered_pose.p[0] - anchor_xr_pose_.p[0],
+      xr_filtered_pose.p[1] - anchor_xr_pose_.p[1],
+      xr_filtered_pose.p[2] - anchor_xr_pose_.p[2],
   };
+  const std::array<double, 3> xr_delta =
+      ApplyVectorDeadband(xr_delta_raw, config_.teleop.xr_translation_deadband_m);
   std::array<double, 3> robot_delta = RotateXrVectorToRobot(xr_delta);
   for (double& value : robot_delta) {
     value *= config_.teleop.scale_factor;
@@ -65,10 +102,11 @@ bool TeleopMapper::ComputeTargetPose(const Pose& current_robot_pose,
     return true;
   }
 
-  const Eigen::Quaterniond xr_current = ToEigenQuat(xr_cmd.right_controller_pose.q);
+  const Eigen::Quaterniond xr_current = ToEigenQuat(xr_filtered_pose.q);
   const Eigen::Quaterniond xr_anchor = ToEigenQuat(anchor_xr_pose_.q);
-  const Eigen::Vector3d xr_rot_delta = QuaternionErrorAngleAxis(xr_anchor, xr_current);
-  const std::array<double, 3> xr_rot_array = ToArray3(xr_rot_delta);
+  const Eigen::Vector3d xr_rot_delta_raw = QuaternionErrorAngleAxis(xr_anchor, xr_current);
+  const std::array<double, 3> xr_rot_array =
+      ApplyVectorDeadband(ToArray3(xr_rot_delta_raw), config_.teleop.xr_rotation_deadband_rad);
   const std::array<double, 3> robot_rot_array = RotateXrVectorToRobot(xr_rot_array);
   const Eigen::Vector3d robot_rot_delta =
       Eigen::Vector3d(robot_rot_array[0], robot_rot_array[1], robot_rot_array[2]);

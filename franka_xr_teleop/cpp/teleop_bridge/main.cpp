@@ -34,16 +34,23 @@ struct Options {
   uint16_t obs_port = 28081;
   bool control_mode_override = false;
   teleop::ControlMode control_mode = teleop::ControlMode::kPose;
+  bool trace_enabled = false;
+  std::string trace_dir = "teleop_trace";
+  uint32_t trace_planner_decimation = 1;
+  uint32_t trace_rt_decimation = 1;
 };
 
 void PrintUsage(const char* prog) {
   std::cout << "Usage:\n"
             << "  " << prog << " [--config-dir configs] [--dry-run] [--no-motion]\n"
             << "             [--robot-ip <ip>] [--obs-ip <ip>] [--obs-port <port>]\n"
-            << "             [--control-mode <pose|position>]\n\n"
+            << "             [--control-mode <pose|position>]\n"
+            << "             [--trace-dir <dir>] [--trace-planner-decimation <N>] "
+               "[--trace-rt-decimation <N>]\n\n"
             << "Examples:\n"
             << "  " << prog << " --dry-run\n"
-            << "  " << prog << " --robot-ip 192.168.2.200 --control-mode position\n";
+            << "  " << prog << " --robot-ip 192.168.2.200 --control-mode position\n"
+            << "  " << prog << " --robot-ip 192.168.2.200 --trace-dir trace_run_01\n";
 }
 
 bool ParseArgs(int argc, char** argv, Options* out) {
@@ -99,6 +106,36 @@ bool ParseArgs(int argc, char** argv, Options* out) {
         return false;
       }
       out->control_mode_override = true;
+      continue;
+    }
+    if (arg == "--trace-dir") {
+      if (i + 1 >= argc) {
+        return false;
+      }
+      out->trace_enabled = true;
+      out->trace_dir = argv[++i];
+      continue;
+    }
+    if (arg == "--trace-planner-decimation") {
+      if (i + 1 >= argc) {
+        return false;
+      }
+      out->trace_enabled = true;
+      out->trace_planner_decimation = static_cast<uint32_t>(std::stoul(argv[++i]));
+      if (out->trace_planner_decimation == 0) {
+        return false;
+      }
+      continue;
+    }
+    if (arg == "--trace-rt-decimation") {
+      if (i + 1 >= argc) {
+        return false;
+      }
+      out->trace_enabled = true;
+      out->trace_rt_decimation = static_cast<uint32_t>(std::stoul(argv[++i]));
+      if (out->trace_rt_decimation == 0) {
+        return false;
+      }
       continue;
     }
     if (arg == "-h" || arg == "--help") {
@@ -211,6 +248,10 @@ int main(int argc, char** argv) {
   } else {
     teleop::FrankaControllerOptions controller_options;
     controller_options.robot_ip = config.bridge.robot_ip;
+    controller_options.trace.enabled = options.trace_enabled;
+    controller_options.trace.output_dir = options.trace_dir;
+    controller_options.trace.planner_decimation = options.trace_planner_decimation;
+    controller_options.trace.rt_decimation = options.trace_rt_decimation;
     teleop::FrankaTeleopController controller(
         controller_options, config.bridge, &command_buffer, &observation_buffer);
 

@@ -18,12 +18,17 @@ class TeleopMapper {
                          TeleopAction* requested_action);
 
  private:
+  Pose FilterXrPose(const Pose& raw_pose);
+  static std::array<double, 3> ApplyVectorDeadband(const std::array<double, 3>& value,
+                                                    double deadband);
   std::array<double, 3> RotateXrVectorToRobot(const std::array<double, 3>& value) const;
 
   TeleopBridgeConfig config_{};
   bool anchor_initialized_ = false;
+  bool xr_filter_initialized_ = false;
   Pose anchor_robot_pose_{};
   Pose anchor_xr_pose_{};
+  Pose filtered_xr_pose_{};
 };
 
 }  // namespace teleop
