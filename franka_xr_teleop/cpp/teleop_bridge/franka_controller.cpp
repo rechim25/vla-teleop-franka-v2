@@ -292,7 +292,6 @@ void PlannerLoop(const TeleopBridgeConfig& config,
     SafetyFilter safety(config.safety, config.teleop.planner_rate_hz);
     TeleopMapper mapper(config);
     TeleopStateMachine state_machine;
-    JointTargetSmoother smoother(config);
     bool deadman_latched = false;
     uint64_t planner_last_ns = 0;
     uint64_t planner_trace_counter = 0;
@@ -401,7 +400,6 @@ void PlannerLoop(const TeleopBridgeConfig& config,
 
       if (!planned.teleop_active) {
         mapper.Reset();
-        smoother.Reset();
         planned_target_buffer->Publish(planned);
         publish_trace();
         std::this_thread::sleep_for(sleep_period);
@@ -418,7 +416,6 @@ void PlannerLoop(const TeleopBridgeConfig& config,
                                             &requested_action);
       planned.requested_action = requested_action;
       if (!has_target) {
-        smoother.Reset();
         planned.control_mode = ControlMode::kHold;
         planned_target_buffer->Publish(planned);
         publish_trace();
@@ -442,7 +439,6 @@ void PlannerLoop(const TeleopBridgeConfig& config,
                           &manipulability);
       if (!ik_ok) {
         planned.faults.ik_rejected = true;
-        smoother.Reset();
         planned.control_mode = ControlMode::kHold;
         planned_target_buffer->Publish(planned);
         publish_trace();
@@ -450,7 +446,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
         continue;
       }
 
-      planned.target_q = smoother.Update(q_target, robot.q);
+      planned.target_q = q_target;
       planned.manipulability = manipulability;
       planned.target_fresh = true;
       planned_target_buffer->Publish(planned);
