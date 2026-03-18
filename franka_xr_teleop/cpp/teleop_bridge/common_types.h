@@ -175,11 +175,20 @@ struct IkConfig {
   double singularity_damping_gain = 1.0;
 };
 
+struct RobotLoadConfig {
+  double mass_kg = 0.0;
+  std::array<double, 3> center_of_mass_m{{0.0, 0.0, 0.0}};
+  std::array<double, 9> inertia_kgm2{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+};
+
 struct TeleopBridgeConfig {
   SafetyLimits safety{};
   TeleopRuntimeConfig teleop{};
   GripperConfig gripper{};
   IkConfig ik{};
+  RobotLoadConfig load{};
+  bool limit_rate = true;
+  double lpf_cutoff_frequency = 100.0;
   std::array<std::array<double, 3>, 3> xr_to_robot_rotation{{
       {{0.0, 0.0, -1.0}},
       {{-1.0, 0.0, 0.0}},

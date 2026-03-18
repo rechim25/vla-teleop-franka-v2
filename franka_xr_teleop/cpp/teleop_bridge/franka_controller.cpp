@@ -43,7 +43,9 @@ void ConfigureConservativeBehavior(franka::Robot* robot) {
       {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}},
       {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}},
       {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}});
-  robot->setJointImpedance({{3000.0, 3000.0, 3000.0, 2500.0, 2500.0, 2000.0, 2000.0}});
+  // Keep the internal joint impedance less aggressive to reduce audible chatter
+  // when teleop commands dither around a steady target.
+  robot->setJointImpedance({{1500.0, 1500.0, 1500.0, 1250.0, 1250.0, 1000.0, 1000.0}});
 }
 
 RobotSnapshot ToSnapshot(const franka::RobotState& state) {
@@ -564,6 +566,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
 
     franka::Robot robot(options_.robot_ip);
     ConfigureConservativeBehavior(&robot);
+    robot.setLoad(config_.load.mass_kg, config_.load.center_of_mass_m, config_.load.inertia_kgm2);
 
     std::unique_ptr<franka::Gripper> gripper;
     std::atomic<double> measured_gripper_width_m{0.0};
@@ -627,11 +630,24 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
 
     uint64_t rt_last_ns = 0;
     uint64_t rt_trace_counter = 0;
+    uint64_t last_success_rate_log_ns = 0;
     const uint32_t rt_trace_decimation = std::max<uint32_t>(1, options_.trace.rt_decimation);
     robot.control([&](const franka::RobotState& state, franka::Duration period) -> franka::JointPositions {
       const uint64_t now_ns = MonotonicNowNs();
       const uint64_t rt_loop_dt_ns = (rt_last_ns == 0) ? 0 : (now_ns - rt_last_ns);
       rt_last_ns = now_ns;
+      if (last_success_rate_log_ns == 0 || (now_ns - last_success_rate_log_ns) >= 5000000000ull) {
+        last_success_rate_log_ns = now_ns;
+        std::cerr << "libfranka control_command_success_rate=" << state.control_command_success_rate
+                  << " q_err_max=" << [&state]() {
+                       double max_err = 0.0;
+                       for (size_t i = 0; i < 7; ++i) {
+                         max_err = std::max(max_err, std::abs(state.q[i] - state.q_d[i]));
+                       }
+                       return max_err;
+                     }()
+                  << "\n";
+      }
       const RobotSnapshot robot_snapshot = ToSnapshot(state);
       robot_state_buffer.Publish(robot_snapshot);
 
@@ -720,7 +736,10 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
         return franka::MotionFinished(out);
       }
       return out;
-    });
+    },
+                  franka::ControllerMode::kJointImpedance,
+                  config_.limit_rate,
+                  config_.lpf_cutoff_frequency);
 
     join_threads();
     stop_trace();

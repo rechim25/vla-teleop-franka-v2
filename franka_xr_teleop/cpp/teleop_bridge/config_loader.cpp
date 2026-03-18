@@ -57,6 +57,11 @@ bool LoadRobotConfig(const std::string& path, AppConfig* config, std::string* er
     return false;
   }
   ReadScalar(robot, "ip", &config->bridge.robot_ip);
+  ReadScalar(robot, "load_mass_kg", &config->bridge.load.mass_kg);
+  ReadArray(robot, "load_center_of_mass_m", &config->bridge.load.center_of_mass_m);
+  ReadArray(robot, "load_inertia_kgm2", &config->bridge.load.inertia_kgm2);
+  ReadScalar(robot, "limit_rate", &config->bridge.limit_rate);
+  ReadScalar(robot, "lpf_cutoff_frequency", &config->bridge.lpf_cutoff_frequency);
   return true;
 }
 
@@ -213,6 +218,14 @@ bool LoadAppConfig(const std::string& config_dir, AppConfig* config, std::string
   }
   if (config->bridge.teleop.xr_rotation_deadband_rad < 0.0) {
     *error = "teleop.xr_rotation_deadband_rad must be >= 0";
+    return false;
+  }
+  if (config->bridge.load.mass_kg < 0.0) {
+    *error = "robot.load_mass_kg must be >= 0";
+    return false;
+  }
+  if (config->bridge.lpf_cutoff_frequency <= 0.0) {
+    *error = "robot.lpf_cutoff_frequency must be > 0";
     return false;
   }
   if (config->bridge.gripper.min_width_m < 0.0 ||

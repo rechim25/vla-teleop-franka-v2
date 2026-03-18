@@ -66,6 +66,15 @@ Live teleop:
   --obs-port 28081
 ```
 
+If robot is in `Reflex` mode, clear it first (no motion command):
+
+```bash
+cd /home/radu/vla-teleop-franka-v2/franka-sanity-checks
+./build/panda_libfranka_sanity --robot-ip 192.168.2.200 --mode recover-only
+```
+
+Then start the teleop bridge again.
+
 ## 4) If you see realtime scheduling error
 
 Symptom:
