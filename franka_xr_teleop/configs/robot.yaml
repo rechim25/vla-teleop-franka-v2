@@ -4,7 +4,7 @@ robot:
   load_center_of_mass_m: [0.0, 0.0, 0.0]
   load_inertia_kgm2: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   limit_rate: true
-  lpf_cutoff_frequency: 60.0
+  lpf_cutoff_frequency: 100.0
   fci_server_version: 5
   libfranka_version_range: ">=0.9.1,<0.10.0"
   libfranka_recommended: 0.9.2
