@@ -107,6 +107,16 @@ bool LoadTeleopConfig(const std::string& path, AppConfig* config, std::string* e
   ReadScalar(teleop, "xr_pose_lowpass_alpha", &config->bridge.teleop.xr_pose_lowpass_alpha);
   ReadScalar(teleop, "xr_translation_deadband_m", &config->bridge.teleop.xr_translation_deadband_m);
   ReadScalar(teleop, "xr_rotation_deadband_rad", &config->bridge.teleop.xr_rotation_deadband_rad);
+  ReadScalar(teleop,
+             "xr_hold_translation_threshold_m",
+             &config->bridge.teleop.xr_hold_translation_threshold_m);
+  ReadScalar(teleop,
+             "xr_hold_rotation_threshold_rad",
+             &config->bridge.teleop.xr_hold_rotation_threshold_rad);
+  ReadScalar(teleop,
+             "xr_hold_release_multiplier",
+             &config->bridge.teleop.xr_hold_release_multiplier);
+  ReadScalar(teleop, "xr_hold_dwell_s", &config->bridge.teleop.xr_hold_dwell_s);
   ReadScalar(teleop, "planner_rate_hz", &config->bridge.teleop.planner_rate_hz);
   ReadArray(teleop, "start_joint_positions_rad", &config->bridge.teleop.start_joint_positions_rad);
 
@@ -219,6 +229,22 @@ bool LoadAppConfig(const std::string& config_dir, AppConfig* config, std::string
   }
   if (config->bridge.teleop.xr_rotation_deadband_rad < 0.0) {
     *error = "teleop.xr_rotation_deadband_rad must be >= 0";
+    return false;
+  }
+  if (config->bridge.teleop.xr_hold_translation_threshold_m < 0.0) {
+    *error = "teleop.xr_hold_translation_threshold_m must be >= 0";
+    return false;
+  }
+  if (config->bridge.teleop.xr_hold_rotation_threshold_rad < 0.0) {
+    *error = "teleop.xr_hold_rotation_threshold_rad must be >= 0";
+    return false;
+  }
+  if (config->bridge.teleop.xr_hold_release_multiplier < 1.0) {
+    *error = "teleop.xr_hold_release_multiplier must be >= 1.0";
+    return false;
+  }
+  if (config->bridge.teleop.xr_hold_dwell_s < 0.0) {
+    *error = "teleop.xr_hold_dwell_s must be >= 0";
     return false;
   }
   if (config->bridge.load.mass_kg < 0.0) {

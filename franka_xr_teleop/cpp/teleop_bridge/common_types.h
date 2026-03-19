@@ -145,6 +145,10 @@ struct TeleopRuntimeConfig {
   double xr_pose_lowpass_alpha = 0.2;
   double xr_translation_deadband_m = 0.0015;
   double xr_rotation_deadband_rad = 0.015;
+  double xr_hold_translation_threshold_m = 0.00075;
+  double xr_hold_rotation_threshold_rad = 0.010;
+  double xr_hold_release_multiplier = 2.5;
+  double xr_hold_dwell_s = 0.12;
   double planner_rate_hz = 100.0;
   std::array<double, 7> start_joint_positions_rad{
       {0.0, -0.7853981633974483, 0.0, -2.356194490192345, 0.0, 1.5707963267948966, 0.7853981633974483}};
