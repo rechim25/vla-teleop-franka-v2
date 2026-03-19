@@ -659,6 +659,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       const double max_step = std::min(config_.ik.max_joint_step_rad,
                                        config_.ik.max_joint_velocity_radps * dt);
       const double rt_alpha = std::clamp(config_.ik.realtime_target_smoothing_alpha, 0.0, 1.0);
+      const double joint_deadzone = std::max(0.0, config_.ik.realtime_joint_deadzone_rad);
       std::array<double, 7> q_cmd = state.q_d;
       std::array<double, 7> target_delta{};
       std::array<double, 7> filtered_delta{};
@@ -669,6 +670,9 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       double max_abs_command_delta = 0.0;
       for (size_t i = 0; i < 7; ++i) {
         target_delta[i] = planned.target_q[i] - state.q_d[i];
+        if (std::abs(target_delta[i]) < joint_deadzone) {
+          target_delta[i] = 0.0;
+        }
         if (apply_motion) {
           filtered_delta[i] = rt_alpha * target_delta[i];
           const double clamped_delta = std::clamp(filtered_delta[i], -max_step, max_step);

@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Plot planner + RT trace CSVs produced by franka_xr_teleop_bridge."""
+"""Plot planner + RT trace CSVs produced by franka_xr_teleop_bridge.
+
+Default output:
+- trace_overview.png: timing, teleop state, XR/cartesian context
+- trace_joints.png: one row per joint with positions and error/delta signals
+
+Single-joint mode:
+- --joint N produces trace_joint_N.png with a larger detailed view
+"""
 
 import argparse
 import pathlib
@@ -20,7 +28,145 @@ def load_csv(path: pathlib.Path):
 def get_col(data, name):
     if name not in data.dtype.names:
         raise KeyError(f"Missing column '{name}'")
-    return data[name]
+    return np.asarray(data[name], dtype=np.float64)
+
+
+def add_legend(ax, ncol=1):
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(loc="upper right", ncol=ncol, fontsize=8)
+
+
+def style_axis(ax, ylabel):
+    ax.set_ylabel(ylabel)
+    ax.grid(True, alpha=0.3)
+
+
+def make_overview_figure(trace_dir, planner, rt, tp, tr):
+    fig, axes = plt.subplots(5, 1, figsize=(16, 14), sharex=True)
+
+    axes[0].plot(tr, get_col(rt, "teleop_state"), label="teleop_state")
+    axes[0].plot(tr, get_col(rt, "apply_motion"), label="apply_motion")
+    axes[0].plot(tr, get_col(rt, "target_fresh"), label="target_fresh")
+    axes[0].plot(tr, get_col(rt, "fault_ik_rejected"), label="fault_ik_rejected")
+    style_axis(axes[0], "State")
+    add_legend(axes[0], ncol=4)
+
+    axes[1].plot(tp, get_col(planner, "xr_pos_0"), label="xr_x")
+    axes[1].plot(tp, get_col(planner, "xr_pos_1"), label="xr_y")
+    axes[1].plot(tp, get_col(planner, "xr_pos_2"), label="xr_z")
+    style_axis(axes[1], "XR Pos [m]")
+    add_legend(axes[1], ncol=3)
+
+    axes[2].plot(tp, get_col(planner, "robot_pos_0"), label="robot_x")
+    axes[2].plot(tp, get_col(planner, "robot_pos_1"), label="robot_y")
+    axes[2].plot(tp, get_col(planner, "robot_pos_2"), label="robot_z")
+    axes[2].plot(tp, get_col(planner, "desired_pos_0"), "--", label="desired_x")
+    axes[2].plot(tp, get_col(planner, "desired_pos_1"), "--", label="desired_y")
+    axes[2].plot(tp, get_col(planner, "desired_pos_2"), "--", label="desired_z")
+    style_axis(axes[2], "Cartesian [m]")
+    add_legend(axes[2], ncol=3)
+
+    xr_dt_ms = np.zeros_like(tp)
+    if tp.size > 1:
+        xr_dt_ms[1:] = np.diff(get_col(planner, "xr_timestamp_ns")) * 1e-6
+    axes[3].plot(tp, get_col(planner, "packet_age_ns") * 1e-6, label="planner_packet_age_ms")
+    axes[3].plot(tr, get_col(rt, "target_age_ns") * 1e-6, label="rt_target_age_ms")
+    axes[3].plot(tr, get_col(rt, "loop_dt_ns") * 1e-6, label="rt_loop_dt_ms")
+    axes[3].plot(tp, xr_dt_ms, label="xr_interarrival_ms")
+    style_axis(axes[3], "Timing [ms]")
+    add_legend(axes[3], ncol=4)
+
+    max_abs_target_delta = get_col(rt, "max_abs_target_delta")
+    max_abs_command_delta = get_col(rt, "max_abs_command_delta")
+    axes[4].plot(tr, max_abs_target_delta, label="max_abs_target_delta")
+    axes[4].plot(tr, max_abs_command_delta, label="max_abs_command_delta")
+    style_axis(axes[4], "RT Delta [rad]")
+    axes[4].set_xlabel("Time [s]")
+    add_legend(axes[4], ncol=2)
+
+    fig.suptitle(f"Teleop Trace Overview: {trace_dir}")
+    fig.tight_layout()
+    return fig
+
+
+def make_joint_grid_figure(trace_dir, rt, tr):
+    fig, axes = plt.subplots(7, 2, figsize=(18, 22), sharex="col")
+
+    for joint in range(7):
+        q = get_col(rt, f"q_{joint}")
+        q_d = get_col(rt, f"q_d_{joint}")
+        q_planned = get_col(rt, f"q_planned_{joint}")
+        q_cmd = get_col(rt, f"q_cmd_{joint}")
+        target_delta = get_col(rt, f"target_delta_{joint}")
+        filtered_delta = get_col(rt, f"filtered_delta_{joint}")
+        command_delta = get_col(rt, f"command_delta_{joint}")
+        q_planned_minus_q = q_planned - q
+        q_cmd_minus_q = q_cmd - q
+
+        ax_pos = axes[joint, 0]
+        ax_err = axes[joint, 1]
+
+        ax_pos.plot(tr, q, label="q_measured", linewidth=1.2)
+        ax_pos.plot(tr, q_d, label="q_d", linewidth=1.0)
+        ax_pos.plot(tr, q_planned, label="q_planned", linewidth=1.0)
+        ax_pos.plot(tr, q_cmd, label="q_cmd", linewidth=1.0)
+        style_axis(ax_pos, f"J{joint} Pos [rad]")
+        add_legend(ax_pos, ncol=4)
+
+        ax_err.plot(tr, q_planned_minus_q, label="q_planned - q", linewidth=1.2)
+        ax_err.plot(tr, q_cmd_minus_q, label="q_cmd - q", linewidth=1.0)
+        ax_err.plot(tr, target_delta, label="target_delta", linewidth=1.0)
+        ax_err.plot(tr, filtered_delta, label="filtered_delta", linewidth=1.0)
+        ax_err.plot(tr, command_delta, label="command_delta", linewidth=1.0)
+        style_axis(ax_err, f"J{joint} Err [rad]")
+        add_legend(ax_err, ncol=3)
+
+    axes[-1, 0].set_xlabel("Time [s]")
+    axes[-1, 1].set_xlabel("Time [s]")
+    axes[0, 0].set_title("Joint Position Signals")
+    axes[0, 1].set_title("Joint Error / Delta Signals")
+    fig.suptitle(f"Teleop Joint Debug View: {trace_dir}")
+    fig.tight_layout()
+    return fig
+
+
+def make_single_joint_figure(trace_dir, rt, tr, joint):
+    q = get_col(rt, f"q_{joint}")
+    q_d = get_col(rt, f"q_d_{joint}")
+    q_planned = get_col(rt, f"q_planned_{joint}")
+    q_cmd = get_col(rt, f"q_cmd_{joint}")
+    target_delta = get_col(rt, f"target_delta_{joint}")
+    filtered_delta = get_col(rt, f"filtered_delta_{joint}")
+    command_delta = get_col(rt, f"command_delta_{joint}")
+    clamp_sat = get_col(rt, f"clamp_saturated_{joint}")
+
+    fig, axes = plt.subplots(3, 1, figsize=(16, 10), sharex=True)
+
+    axes[0].plot(tr, q, label="q_measured")
+    axes[0].plot(tr, q_d, label="q_d")
+    axes[0].plot(tr, q_planned, label="q_planned")
+    axes[0].plot(tr, q_cmd, label="q_cmd")
+    style_axis(axes[0], f"J{joint} Pos [rad]")
+    add_legend(axes[0], ncol=4)
+
+    axes[1].plot(tr, q_planned - q, label="q_planned - q")
+    axes[1].plot(tr, q_cmd - q, label="q_cmd - q")
+    axes[1].plot(tr, q_planned - q_d, label="q_planned - q_d")
+    style_axis(axes[1], f"J{joint} Error [rad]")
+    add_legend(axes[1], ncol=3)
+
+    axes[2].plot(tr, target_delta, label="target_delta")
+    axes[2].plot(tr, filtered_delta, label="filtered_delta")
+    axes[2].plot(tr, command_delta, label="command_delta")
+    axes[2].plot(tr, clamp_sat, label="clamp_saturated")
+    style_axis(axes[2], f"J{joint} Delta [rad]")
+    axes[2].set_xlabel("Time [s]")
+    add_legend(axes[2], ncol=4)
+
+    fig.suptitle(f"Teleop Joint {joint} Detail: {trace_dir}")
+    fig.tight_layout()
+    return fig
 
 
 def main():
@@ -35,20 +181,9 @@ def main():
         "--joint",
         type=int,
         default=None,
-        help="Joint index [0..6] for single-joint mode (default plots all joints)",
+        help="Optional joint index [0..6] for an additional detailed single-joint figure",
     )
-    parser.add_argument(
-        "--all-joints",
-        action="store_true",
-        help="Force plotting all 7 joints (default when --joint is not set)",
-    )
-    parser.add_argument(
-        "--out",
-        type=pathlib.Path,
-        default=None,
-        help="Output image path (default: <trace-dir>/trace_summary.png)",
-    )
-    parser.add_argument("--show", action="store_true", help="Show interactive window")
+    parser.add_argument("--show", action="store_true", help="Show interactive windows")
     args = parser.parse_args()
 
     if args.joint is not None and (args.joint < 0 or args.joint > 6):
@@ -63,91 +198,26 @@ def main():
     tp = (planner["timestamp_ns"].astype(np.float64) - float(t0_ns)) * 1e-9
     tr = (rt["timestamp_ns"].astype(np.float64) - float(t0_ns)) * 1e-9
 
-    all_joints_mode = args.all_joints or args.joint is None
+    overview_fig = make_overview_figure(args.trace_dir, planner, rt, tp, tr)
+    overview_path = args.trace_dir / "trace_overview.png"
+    overview_fig.savefig(overview_path, dpi=150)
+    print(f"Saved plot: {overview_path}")
 
-    fig, axes = plt.subplots(6, 1, figsize=(14, 14), sharex=True)
+    joints_fig = make_joint_grid_figure(args.trace_dir, rt, tr)
+    joints_path = args.trace_dir / "trace_joints.png"
+    joints_fig.savefig(joints_path, dpi=150)
+    print(f"Saved plot: {joints_path}")
 
-    axes[0].plot(tr, get_col(rt, "teleop_state"), label="teleop_state")
-    axes[0].plot(tr, get_col(rt, "apply_motion"), label="apply_motion")
-    axes[0].plot(tr, get_col(rt, "fault_jump_rejected"), label="jump_rejected")
-    axes[0].set_ylabel("State/Fault")
-    axes[0].legend(loc="upper right")
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].plot(tp, get_col(planner, "xr_pos_0"), label="vr_x")
-    axes[1].plot(tp, get_col(planner, "xr_pos_1"), label="vr_y")
-    axes[1].plot(tp, get_col(planner, "xr_pos_2"), label="vr_z")
-    axes[1].set_ylabel("VR XYZ [m]")
-    axes[1].legend(loc="upper right")
-    axes[1].grid(True, alpha=0.3)
-
-    axes[2].plot(tp, get_col(planner, "robot_pos_2"), label="robot_z")
-    axes[2].plot(tp, get_col(planner, "desired_pos_2"), label="desired_z")
-    axes[2].plot(tp, get_col(planner, "safe_pos_2"), label="safe_z")
-    axes[2].set_ylabel("Cartesian Z [m]")
-    axes[2].legend(loc="upper right")
-    axes[2].grid(True, alpha=0.3)
-
-    if all_joints_mode:
-        cmap = plt.get_cmap("tab10")
-        for joint in range(7):
-            color = cmap(joint % 10)
-            axes[3].plot(tr, get_col(rt, f"q_cmd_{joint}"), color=color, label=f"q_cmd_{joint}")
-        axes[3].set_ylabel("All q_cmd [rad]")
-        axes[3].legend(loc="upper right", ncol=4, fontsize=8)
-        axes[3].grid(True, alpha=0.3)
-
-        for joint in range(7):
-            color = cmap(joint % 10)
-            axes[4].plot(
-                tr,
-                get_col(rt, f"command_delta_{joint}"),
-                color=color,
-                label=f"cmd_dq_{joint}",
-            )
-        axes[4].set_ylabel("All cmd_delta [rad]")
-        axes[4].legend(loc="upper right", ncol=4, fontsize=8)
-        axes[4].grid(True, alpha=0.3)
-    else:
-        joint = args.joint
-        axes[3].plot(tr, get_col(rt, f"q_d_{joint}"), label=f"q_d_{joint}")
-        axes[3].plot(tr, get_col(rt, f"q_planned_{joint}"), label=f"q_planned_{joint}")
-        axes[3].plot(tr, get_col(rt, f"q_cmd_{joint}"), label=f"q_cmd_{joint}")
-        axes[3].set_ylabel(f"Joint {joint} [rad]")
-        axes[3].legend(loc="upper right")
-        axes[3].grid(True, alpha=0.3)
-
-        axes[4].plot(tr, get_col(rt, f"target_delta_{joint}"), label=f"target_delta_{joint}")
-        axes[4].plot(tr, get_col(rt, f"filtered_delta_{joint}"), label=f"filtered_delta_{joint}")
-        axes[4].plot(tr, get_col(rt, f"command_delta_{joint}"), label=f"command_delta_{joint}")
-        axes[4].plot(
-            tr,
-            get_col(rt, f"clamp_saturated_{joint}"),
-            label=f"clamp_sat_{joint}",
-            linewidth=1.0,
-        )
-        axes[4].set_ylabel(f"Delta J{joint} [rad]")
-        axes[4].legend(loc="upper right")
-        axes[4].grid(True, alpha=0.3)
-
-    axes[5].plot(tp, get_col(planner, "packet_age_ns") * 1e-6, label="planner_packet_age_ms")
-    axes[5].plot(tr, get_col(rt, "target_age_ns") * 1e-6, label="rt_target_age_ms")
-    axes[5].plot(tr, get_col(rt, "loop_dt_ns") * 1e-6, label="rt_loop_dt_ms")
-    axes[5].set_ylabel("Age / dt [ms]")
-    axes[5].set_xlabel("Time [s]")
-    axes[5].legend(loc="upper right")
-    axes[5].grid(True, alpha=0.3)
-
-    title_suffix = " (all joints + VR XYZ)" if all_joints_mode else f" (joint {args.joint} + VR XYZ)"
-    fig.suptitle(f"Teleop Trace Summary: {args.trace_dir}{title_suffix}")
-    fig.tight_layout()
-
-    output_path = args.out or (args.trace_dir / "trace_summary.png")
-    fig.savefig(output_path, dpi=150)
-    print(f"Saved plot: {output_path}")
+    if args.joint is not None:
+        joint_fig = make_single_joint_figure(args.trace_dir, rt, tr, args.joint)
+        joint_path = args.trace_dir / f"trace_joint_{args.joint}.png"
+        joint_fig.savefig(joint_path, dpi=150)
+        print(f"Saved plot: {joint_path}")
 
     if args.show:
         plt.show()
+    else:
+        plt.close("all")
 
 
 if __name__ == "__main__":

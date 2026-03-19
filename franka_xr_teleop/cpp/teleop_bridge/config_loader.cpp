@@ -129,6 +129,7 @@ bool LoadTeleopConfig(const std::string& path, AppConfig* config, std::string* e
     ReadScalar(ik,
                "realtime_target_smoothing_alpha",
                &config->bridge.ik.realtime_target_smoothing_alpha);
+    ReadScalar(ik, "realtime_joint_deadzone_rad", &config->bridge.ik.realtime_joint_deadzone_rad);
     ReadScalar(ik, "position_gain", &config->bridge.ik.position_gain);
     ReadScalar(ik, "orientation_gain", &config->bridge.ik.orientation_gain);
     ReadScalar(ik, "task_translation_deadband_m", &config->bridge.ik.task_translation_deadband_m);
@@ -261,6 +262,10 @@ bool LoadAppConfig(const std::string& config_dir, AppConfig* config, std::string
   if (config->bridge.ik.realtime_target_smoothing_alpha < 0.0 ||
       config->bridge.ik.realtime_target_smoothing_alpha > 1.0) {
     *error = "teleop.ik.realtime_target_smoothing_alpha must be in [0, 1]";
+    return false;
+  }
+  if (config->bridge.ik.realtime_joint_deadzone_rad < 0.0) {
+    *error = "teleop.ik.realtime_joint_deadzone_rad must be >= 0";
     return false;
   }
   if (config->bridge.ik.task_translation_deadband_m < 0.0) {

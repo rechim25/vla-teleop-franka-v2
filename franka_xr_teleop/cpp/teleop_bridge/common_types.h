@@ -167,6 +167,7 @@ struct IkConfig {
   double max_joint_step_rad = 0.008;
   double target_smoothing_alpha = 0.25;
   double realtime_target_smoothing_alpha = 0.08;
+  double realtime_joint_deadzone_rad = 0.001;
   double position_gain = 3.0;
   double orientation_gain = 2.0;
   double task_translation_deadband_m = 0.001;
