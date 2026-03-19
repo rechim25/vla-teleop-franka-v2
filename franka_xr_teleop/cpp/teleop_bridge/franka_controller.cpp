@@ -142,13 +142,14 @@ Eigen::Vector3d ApplyVectorDeadband(const Eigen::Vector3d& value, double deadban
 
 bool SolveIkStep(const franka::Model& model,
                  const RobotSnapshot& snapshot,
+                 const std::array<double, 7>& reference_q,
                  const Pose& desired_pose,
                  const TeleopBridgeConfig& config,
                  ControlMode control_mode,
                  std::array<double, 7>* target_q,
                  double* manipulability) {
   if (control_mode == ControlMode::kHold) {
-    *target_q = snapshot.q;
+    *target_q = reference_q;
     *manipulability = 0.0;
     return true;
   }
@@ -190,7 +191,7 @@ bool SolveIkStep(const franka::Model& model,
   }
 
   const Eigen::Matrix<double, 7, 1> q_current =
-      Eigen::Map<const Eigen::Matrix<double, 7, 1>>(snapshot.q.data());
+      Eigen::Map<const Eigen::Matrix<double, 7, 1>>(reference_q.data());
   const Eigen::Matrix<double, 7, 1> q_home =
       Eigen::Map<const Eigen::Matrix<double, 7, 1>>(config.teleop.start_joint_positions_rad.data());
   const Eigen::Matrix<double, 7, 1> dq_primary =
@@ -202,7 +203,7 @@ bool SolveIkStep(const franka::Model& model,
       dq_primary + config.ik.nullspace_gain * nullspace_projector * (q_home - q_current);
 
   const double dt = 1.0 / config.teleop.planner_rate_hz;
-  std::array<double, 7> q_next = snapshot.q;
+  std::array<double, 7> q_next = reference_q;
   const double max_step_by_velocity = config.ik.max_joint_velocity_radps * dt;
   const double max_step = std::min(config.ik.max_joint_step_rad, max_step_by_velocity);
 
@@ -295,6 +296,8 @@ void PlannerLoop(const TeleopBridgeConfig& config,
     TeleopMapper mapper(config);
     TeleopStateMachine state_machine;
     bool deadman_latched = false;
+    bool planner_q_ref_initialized = false;
+    std::array<double, 7> planner_q_ref{};
     uint64_t planner_last_ns = 0;
     uint64_t planner_trace_counter = 0;
     const uint32_t planner_trace_decimation = std::max<uint32_t>(1, trace_decimation);
@@ -367,6 +370,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       };
 
       if (robot.timestamp_ns == 0) {
+        planner_q_ref_initialized = false;
         planned_target_buffer->Publish(planned);
         publish_trace();
         std::this_thread::sleep_for(sleep_period);
@@ -401,6 +405,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       }
 
       if (!planned.teleop_active) {
+        planner_q_ref_initialized = false;
         mapper.Reset();
         planned_target_buffer->Publish(planned);
         publish_trace();
@@ -430,10 +435,15 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       safe_target = true;
       safe_pose = desired_pose;
       planned.desired_tcp_pose = safe_pose;
+      if (!planner_q_ref_initialized) {
+        planner_q_ref = robot.q;
+        planner_q_ref_initialized = true;
+      }
 
       double manipulability = 0.0;
       ik_ok = SolveIkStep(model,
                           robot,
+                          planner_q_ref,
                           safe_pose,
                           config,
                           planned.control_mode,
@@ -442,6 +452,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       if (!ik_ok) {
         planned.faults.ik_rejected = true;
         planned.control_mode = ControlMode::kHold;
+        planner_q_ref_initialized = false;
         planned_target_buffer->Publish(planned);
         publish_trace();
         std::this_thread::sleep_for(sleep_period);
@@ -449,6 +460,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       }
 
       planned.target_q = q_target;
+      planner_q_ref = q_target;
       planned.manipulability = manipulability;
       planned.target_fresh = true;
       planned_target_buffer->Publish(planned);
@@ -631,6 +643,8 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
     uint64_t rt_last_ns = 0;
     uint64_t rt_trace_counter = 0;
     uint64_t last_success_rate_log_ns = 0;
+    std::array<double, 7> prev_command_velocity{};
+    bool prev_command_velocity_initialized = false;
     const uint32_t rt_trace_decimation = std::max<uint32_t>(1, options_.trace.rt_decimation);
     robot.control([&](const franka::RobotState& state, franka::Duration period) -> franka::JointPositions {
       const uint64_t now_ns = MonotonicNowNs();
@@ -658,8 +672,18 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       const double dt = std::max(period.toSec(), 1e-6);
       const double max_step = std::min(config_.ik.max_joint_step_rad,
                                        config_.ik.max_joint_velocity_radps * dt);
+      const double max_velocity = std::max(config_.ik.max_joint_velocity_radps, 1e-6);
+      const double max_delta_velocity =
+          std::max(config_.ik.max_joint_acceleration_radps2, 1e-6) * dt;
       const double rt_alpha = std::clamp(config_.ik.realtime_target_smoothing_alpha, 0.0, 1.0);
       const double joint_deadzone = std::max(0.0, config_.ik.realtime_joint_deadzone_rad);
+      if (!apply_motion) {
+        prev_command_velocity.fill(0.0);
+        prev_command_velocity_initialized = false;
+      } else if (!prev_command_velocity_initialized) {
+        prev_command_velocity.fill(0.0);
+        prev_command_velocity_initialized = true;
+      }
       std::array<double, 7> q_cmd = state.q_d;
       std::array<double, 7> target_delta{};
       std::array<double, 7> filtered_delta{};
@@ -675,10 +699,19 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
         }
         if (apply_motion) {
           filtered_delta[i] = rt_alpha * target_delta[i];
-          const double clamped_delta = std::clamp(filtered_delta[i], -max_step, max_step);
+          const double desired_velocity = filtered_delta[i] / dt;
+          const double velocity_limited = std::clamp(desired_velocity, -max_velocity, max_velocity);
+          const double accel_limited_velocity =
+              prev_command_velocity[i] +
+              std::clamp(velocity_limited - prev_command_velocity[i],
+                         -max_delta_velocity,
+                         max_delta_velocity);
+          const double unclamped_delta = accel_limited_velocity * dt;
+          const double clamped_delta = std::clamp(unclamped_delta, -max_step, max_step);
           q_cmd[i] = state.q_d[i] + clamped_delta;
           command_delta[i] = clamped_delta;
-          if (std::abs(filtered_delta[i]) > max_step + 1e-12) {
+          prev_command_velocity[i] = clamped_delta / dt;
+          if (std::abs(unclamped_delta) > max_step + 1e-12) {
             clamp_saturated[i] = 1;
           }
         }
