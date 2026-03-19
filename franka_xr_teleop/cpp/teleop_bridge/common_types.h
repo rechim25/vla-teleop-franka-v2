@@ -85,8 +85,10 @@ struct FaultFlags {
 struct RobotSnapshot {
   uint64_t timestamp_ns = 0;
   std::array<double, 7> q{};
+  std::array<double, 7> q_d{};
   std::array<double, 7> dq{};
   Pose tcp_pose{};
+  Pose tcp_pose_d{};
   std::array<double, 16> F_T_EE{};
   std::array<double, 16> EE_T_K{};
   bool robot_ok = false;

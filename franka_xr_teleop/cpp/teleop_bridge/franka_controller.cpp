@@ -52,8 +52,10 @@ RobotSnapshot ToSnapshot(const franka::RobotState& state) {
   RobotSnapshot snapshot{};
   snapshot.timestamp_ns = MonotonicNowNs();
   snapshot.q = state.q;
+  snapshot.q_d = state.q_d;
   snapshot.dq = state.dq;
   snapshot.tcp_pose = MatrixToPose(state.O_T_EE);
+  snapshot.tcp_pose_d = MatrixToPose(state.O_T_EE_d);
   snapshot.F_T_EE = state.F_T_EE;
   snapshot.EE_T_K = state.EE_T_K;
   snapshot.in_reflex = (state.robot_mode == franka::RobotMode::kReflex);
@@ -148,24 +150,26 @@ bool SolveIkStep(const franka::Model& model,
                  std::array<double, 7>* target_q,
                  double* manipulability) {
   if (control_mode == ControlMode::kHold) {
-    *target_q = snapshot.q;
+    *target_q = snapshot.q_d;
     *manipulability = 0.0;
     return true;
   }
 
+  // Build the next reference from the commanded state that libfranka is already
+  // tracking, instead of re-seeding from measured joint motion every planner tick.
   const Eigen::Matrix<double, 6, 7> jacobian = JacobianToEigen(
-      model.zeroJacobian(franka::Frame::kEndEffector, snapshot.q, snapshot.F_T_EE, snapshot.EE_T_K));
+      model.zeroJacobian(franka::Frame::kEndEffector, snapshot.q_d, snapshot.F_T_EE, snapshot.EE_T_K));
   Eigen::Matrix<double, 6, 7> jacobian_task = jacobian;
 
   Eigen::Matrix<double, 6, 1> task_error = Eigen::Matrix<double, 6, 1>::Zero();
-  const Eigen::Vector3d raw_position_error = ToEigen(desired_pose.p) - ToEigen(snapshot.tcp_pose.p);
+  const Eigen::Vector3d raw_position_error = ToEigen(desired_pose.p) - ToEigen(snapshot.tcp_pose_d.p);
   const Eigen::Vector3d position_error =
       ApplyVectorDeadband(raw_position_error, config.ik.task_translation_deadband_m);
   task_error.head<3>() = config.ik.position_gain * position_error;
 
   if (control_mode == ControlMode::kPose) {
     const Eigen::Vector3d raw_rotation_error =
-        QuaternionErrorAngleAxis(ToEigenQuat(snapshot.tcp_pose.q), ToEigenQuat(desired_pose.q));
+        QuaternionErrorAngleAxis(ToEigenQuat(snapshot.tcp_pose_d.q), ToEigenQuat(desired_pose.q));
     const Eigen::Vector3d rotation_error =
         ApplyVectorDeadband(raw_rotation_error, config.ik.task_rotation_deadband_rad);
     task_error.tail<3>() = config.ik.orientation_gain * rotation_error;
@@ -190,7 +194,7 @@ bool SolveIkStep(const franka::Model& model,
   }
 
   const Eigen::Matrix<double, 7, 1> q_current =
-      Eigen::Map<const Eigen::Matrix<double, 7, 1>>(snapshot.q.data());
+      Eigen::Map<const Eigen::Matrix<double, 7, 1>>(snapshot.q_d.data());
   const Eigen::Matrix<double, 7, 1> q_home =
       Eigen::Map<const Eigen::Matrix<double, 7, 1>>(config.teleop.start_joint_positions_rad.data());
   const Eigen::Matrix<double, 7, 1> dq_primary =
@@ -202,7 +206,7 @@ bool SolveIkStep(const franka::Model& model,
       dq_primary + config.ik.nullspace_gain * nullspace_projector * (q_home - q_current);
 
   const double dt = 1.0 / config.teleop.planner_rate_hz;
-  std::array<double, 7> q_next = snapshot.q;
+  std::array<double, 7> q_next = snapshot.q_d;
   const double max_step_by_velocity = config.ik.max_joint_velocity_radps * dt;
   const double max_step = std::min(config.ik.max_joint_step_rad, max_step_by_velocity);
 
