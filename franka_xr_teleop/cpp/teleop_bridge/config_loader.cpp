@@ -134,12 +134,24 @@ bool LoadTeleopConfig(const std::string& path, AppConfig* config, std::string* e
     ReadScalar(ik, "nullspace_gain", &config->bridge.ik.nullspace_gain);
     ReadScalar(ik, "max_joint_velocity_radps", &config->bridge.ik.max_joint_velocity_radps);
     ReadScalar(ik, "max_joint_acceleration_radps2", &config->bridge.ik.max_joint_acceleration_radps2);
+    ReadScalar(ik, "max_joint_jerk_radps3", &config->bridge.ik.max_joint_jerk_radps3);
     ReadScalar(ik, "max_joint_step_rad", &config->bridge.ik.max_joint_step_rad);
     ReadScalar(ik, "target_smoothing_alpha", &config->bridge.ik.target_smoothing_alpha);
     ReadScalar(ik,
                "realtime_target_smoothing_alpha",
                &config->bridge.ik.realtime_target_smoothing_alpha);
     ReadScalar(ik, "realtime_joint_deadzone_rad", &config->bridge.ik.realtime_joint_deadzone_rad);
+    ReadScalar(ik, "realtime_servo_kp", &config->bridge.ik.realtime_servo_kp);
+    ReadScalar(ik, "realtime_servo_kd", &config->bridge.ik.realtime_servo_kd);
+    ReadScalar(ik,
+               "realtime_hold_position_threshold_rad",
+               &config->bridge.ik.realtime_hold_position_threshold_rad);
+    ReadScalar(ik,
+               "realtime_hold_velocity_threshold_radps",
+               &config->bridge.ik.realtime_hold_velocity_threshold_radps);
+    ReadScalar(ik,
+               "realtime_hold_release_threshold_rad",
+               &config->bridge.ik.realtime_hold_release_threshold_rad);
     ReadScalar(ik, "position_gain", &config->bridge.ik.position_gain);
     ReadScalar(ik, "orientation_gain", &config->bridge.ik.orientation_gain);
     ReadScalar(ik, "task_translation_deadband_m", &config->bridge.ik.task_translation_deadband_m);
@@ -280,6 +292,10 @@ bool LoadAppConfig(const std::string& config_dir, AppConfig* config, std::string
     *error = "teleop.ik.max_joint_acceleration_radps2 must be > 0";
     return false;
   }
+  if (config->bridge.ik.max_joint_jerk_radps3 <= 0.0) {
+    *error = "teleop.ik.max_joint_jerk_radps3 must be > 0";
+    return false;
+  }
   if (config->bridge.ik.target_smoothing_alpha < 0.0 ||
       config->bridge.ik.target_smoothing_alpha > 1.0) {
     *error = "teleop.ik.target_smoothing_alpha must be in [0, 1]";
@@ -292,6 +308,28 @@ bool LoadAppConfig(const std::string& config_dir, AppConfig* config, std::string
   }
   if (config->bridge.ik.realtime_joint_deadzone_rad < 0.0) {
     *error = "teleop.ik.realtime_joint_deadzone_rad must be >= 0";
+    return false;
+  }
+  if (config->bridge.ik.realtime_servo_kp <= 0.0) {
+    *error = "teleop.ik.realtime_servo_kp must be > 0";
+    return false;
+  }
+  if (config->bridge.ik.realtime_servo_kd < 0.0) {
+    *error = "teleop.ik.realtime_servo_kd must be >= 0";
+    return false;
+  }
+  if (config->bridge.ik.realtime_hold_position_threshold_rad < 0.0) {
+    *error = "teleop.ik.realtime_hold_position_threshold_rad must be >= 0";
+    return false;
+  }
+  if (config->bridge.ik.realtime_hold_velocity_threshold_radps < 0.0) {
+    *error = "teleop.ik.realtime_hold_velocity_threshold_radps must be >= 0";
+    return false;
+  }
+  if (config->bridge.ik.realtime_hold_release_threshold_rad <
+      config->bridge.ik.realtime_hold_position_threshold_rad) {
+    *error =
+        "teleop.ik.realtime_hold_release_threshold_rad must be >= teleop.ik.realtime_hold_position_threshold_rad";
     return false;
   }
   if (config->bridge.ik.task_translation_deadband_m < 0.0) {

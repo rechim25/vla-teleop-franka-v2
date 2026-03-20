@@ -170,10 +170,16 @@ struct IkConfig {
   double nullspace_gain = 0.15;
   double max_joint_velocity_radps = 0.35;
   double max_joint_acceleration_radps2 = 1.5;
+  double max_joint_jerk_radps3 = 12.0;
   double max_joint_step_rad = 0.008;
   double target_smoothing_alpha = 0.25;
   double realtime_target_smoothing_alpha = 0.08;
   double realtime_joint_deadzone_rad = 0.001;
+  double realtime_servo_kp = 60.0;
+  double realtime_servo_kd = 10.0;
+  double realtime_hold_position_threshold_rad = 0.0008;
+  double realtime_hold_velocity_threshold_radps = 0.01;
+  double realtime_hold_release_threshold_rad = 0.0016;
   double position_gain = 3.0;
   double orientation_gain = 2.0;
   double task_translation_deadband_m = 0.001;

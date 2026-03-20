@@ -222,64 +222,164 @@ bool SolveIkStep(const franka::Model& model,
   return true;
 }
 
-class JointTargetSmoother {
+class JointPositionTrajectoryGenerator {
  public:
-  explicit JointTargetSmoother(const TeleopBridgeConfig& config)
-      : dt_(1.0 / std::max(config.teleop.planner_rate_hz, 1.0)),
-        max_velocity_(std::max(config.ik.max_joint_velocity_radps, 1e-6)),
+  explicit JointPositionTrajectoryGenerator(const TeleopBridgeConfig& config)
+      : max_velocity_(std::max(config.ik.max_joint_velocity_radps, 1e-6)),
         max_acceleration_(std::max(config.ik.max_joint_acceleration_radps2, 1e-6)),
+        max_jerk_(std::max(config.ik.max_joint_jerk_radps3, 1e-6)),
         max_step_(std::max(0.0, config.ik.max_joint_step_rad)),
-        alpha_(std::clamp(config.ik.target_smoothing_alpha, 0.0, 1.0)) {}
+        joint_deadzone_(std::max(0.0, config.ik.realtime_joint_deadzone_rad)),
+        servo_kp_(std::max(config.ik.realtime_servo_kp, 1e-6)),
+        servo_kd_(std::max(0.0, config.ik.realtime_servo_kd)),
+        hold_position_threshold_(std::max(0.0, config.ik.realtime_hold_position_threshold_rad)),
+        hold_velocity_threshold_(
+            std::max(0.0, config.ik.realtime_hold_velocity_threshold_radps)),
+        hold_release_threshold_(
+            std::max(config.ik.realtime_hold_position_threshold_rad,
+                     config.ik.realtime_hold_release_threshold_rad)) {}
 
   void Reset() {
     initialized_ = false;
-    prev_q_.fill(0.0);
-    prev_dq_.fill(0.0);
+    hold_active_ = false;
+    q_ref_.fill(0.0);
+    dq_ref_.fill(0.0);
+    ddq_ref_.fill(0.0);
   }
 
-  std::array<double, 7> Update(const std::array<double, 7>& raw_target_q,
-                               const std::array<double, 7>& reference_q) {
+  std::array<double, 7> Update(const std::array<double, 7>& target_q,
+                               const std::array<double, 7>& reference_q,
+                               double dt,
+                               bool apply_motion,
+                               std::array<double, 7>* target_delta,
+                               std::array<double, 7>* filtered_delta,
+                               std::array<double, 7>* command_delta,
+                               std::array<uint8_t, 7>* clamp_saturated) {
+    if (!apply_motion) {
+      Reset();
+      target_delta->fill(0.0);
+      filtered_delta->fill(0.0);
+      command_delta->fill(0.0);
+      clamp_saturated->fill(0);
+      return reference_q;
+    }
+
     if (!initialized_) {
-      prev_q_ = reference_q;
-      prev_dq_.fill(0.0);
+      q_ref_ = reference_q;
+      dq_ref_.fill(0.0);
+      ddq_ref_.fill(0.0);
       initialized_ = true;
     }
 
-    std::array<double, 7> q_out = prev_q_;
-    std::array<double, 7> dq_out = prev_dq_;
-
-    const double max_step_from_velocity = max_velocity_ * dt_;
+    dt = std::max(dt, 1e-6);
+    const double max_step_from_velocity = max_velocity_ * dt;
     const double max_step = max_step_ > 0.0 ? std::min(max_step_, max_step_from_velocity)
                                             : max_step_from_velocity;
-    const double max_delta_velocity = max_acceleration_ * dt_;
+    const double max_delta_acceleration = max_jerk_ * dt;
 
     for (size_t i = 0; i < 7; ++i) {
-      const double raw_vel = (raw_target_q[i] - prev_q_[i]) / dt_;
-      const double blended_vel = alpha_ * raw_vel + (1.0 - alpha_) * prev_dq_[i];
-      const double velocity_limited = std::clamp(blended_vel, -max_velocity_, max_velocity_);
-      const double accel_limited = prev_dq_[i] +
-                                   std::clamp(velocity_limited - prev_dq_[i],
-                                              -max_delta_velocity,
-                                              max_delta_velocity);
-      const double step = std::clamp(accel_limited * dt_, -max_step, max_step);
-      q_out[i] = prev_q_[i] + step;
-      dq_out[i] = step / dt_;
+      (*target_delta)[i] = target_q[i] - reference_q[i];
+      (*filtered_delta)[i] = q_ref_[i] - reference_q[i];
     }
 
-    prev_q_ = q_out;
-    prev_dq_ = dq_out;
+    double max_abs_hold_error = 0.0;
+    bool within_hold_band = true;
+    for (size_t i = 0; i < 7; ++i) {
+      const double error_to_ref = target_q[i] - q_ref_[i];
+      max_abs_hold_error = std::max(max_abs_hold_error, std::abs(error_to_ref));
+      if (std::abs(error_to_ref) > hold_position_threshold_ ||
+          std::abs(dq_ref_[i]) > hold_velocity_threshold_) {
+        within_hold_band = false;
+      }
+    }
+
+    if (hold_active_ && max_abs_hold_error <= hold_release_threshold_) {
+      dq_ref_.fill(0.0);
+      ddq_ref_.fill(0.0);
+      command_delta->fill(0.0);
+      clamp_saturated->fill(0);
+      return q_ref_;
+    }
+
+    if (within_hold_band) {
+      hold_active_ = true;
+      dq_ref_.fill(0.0);
+      ddq_ref_.fill(0.0);
+      command_delta->fill(0.0);
+      clamp_saturated->fill(0);
+      return q_ref_;
+    }
+
+    hold_active_ = false;
+    std::array<double, 7> q_out = q_ref_;
+    std::array<double, 7> dq_out = dq_ref_;
+    std::array<double, 7> ddq_out = ddq_ref_;
+    command_delta->fill(0.0);
+    clamp_saturated->fill(0);
+
+    for (size_t i = 0; i < 7; ++i) {
+      double error = target_q[i] - q_ref_[i];
+      if (std::abs(error) < joint_deadzone_) {
+        error = 0.0;
+      }
+
+      const double desired_acceleration =
+          std::clamp(servo_kp_ * error - servo_kd_ * dq_ref_[i],
+                     -max_acceleration_,
+                     max_acceleration_);
+      ddq_out[i] = ddq_ref_[i] +
+                   std::clamp(desired_acceleration - ddq_ref_[i],
+                              -max_delta_acceleration,
+                              max_delta_acceleration);
+      ddq_out[i] = std::clamp(ddq_out[i], -max_acceleration_, max_acceleration_);
+
+      const double velocity_unclamped = dq_ref_[i] + ddq_out[i] * dt;
+      dq_out[i] = std::clamp(velocity_unclamped, -max_velocity_, max_velocity_);
+
+      const double step_unclamped = dq_out[i] * dt;
+      const double step = std::clamp(step_unclamped, -max_step, max_step);
+      q_out[i] = q_ref_[i] + step;
+
+      if (error != 0.0) {
+        const double new_error = target_q[i] - q_out[i];
+        if ((error > 0.0 && new_error < 0.0) || (error < 0.0 && new_error > 0.0)) {
+          q_out[i] = target_q[i];
+          dq_out[i] = 0.0;
+          ddq_out[i] = 0.0;
+        }
+      }
+
+      (*command_delta)[i] = q_out[i] - reference_q[i];
+      if (std::abs(velocity_unclamped - dq_out[i]) > 1e-12 || std::abs(step_unclamped - step) > 1e-12) {
+        (*clamp_saturated)[i] = 1;
+      }
+    }
+
+    q_ref_ = q_out;
+    dq_ref_ = dq_out;
+    ddq_ref_ = ddq_out;
+    for (size_t i = 0; i < 7; ++i) {
+      (*filtered_delta)[i] = q_ref_[i] - reference_q[i];
+    }
     return q_out;
   }
 
  private:
-  double dt_ = 0.01;
   double max_velocity_ = 0.35;
   double max_acceleration_ = 1.5;
+  double max_jerk_ = 12.0;
   double max_step_ = 0.008;
-  double alpha_ = 0.25;
+  double joint_deadzone_ = 0.001;
+  double servo_kp_ = 60.0;
+  double servo_kd_ = 10.0;
+  double hold_position_threshold_ = 0.0008;
+  double hold_velocity_threshold_ = 0.01;
+  double hold_release_threshold_ = 0.0016;
   bool initialized_ = false;
-  std::array<double, 7> prev_q_{};
-  std::array<double, 7> prev_dq_{};
+  bool hold_active_ = false;
+  std::array<double, 7> q_ref_{};
+  std::array<double, 7> dq_ref_{};
+  std::array<double, 7> ddq_ref_{};
 };
 
 void PlannerLoop(const TeleopBridgeConfig& config,
@@ -635,8 +735,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
     uint64_t rt_last_ns = 0;
     uint64_t rt_trace_counter = 0;
     uint64_t last_success_rate_log_ns = 0;
-    std::array<double, 7> prev_command_velocity{};
-    bool prev_command_velocity_initialized = false;
+    JointPositionTrajectoryGenerator trajectory_generator(config_);
     const uint32_t rt_trace_decimation = std::max<uint32_t>(1, options_.trace.rt_decimation);
     robot.control([&](const franka::RobotState& state, franka::Duration period) -> franka::JointPositions {
       const uint64_t now_ns = MonotonicNowNs();
@@ -664,49 +763,23 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       const double dt = std::max(period.toSec(), 1e-6);
       const double max_step = std::min(config_.ik.max_joint_step_rad,
                                        config_.ik.max_joint_velocity_radps * dt);
-      const double max_velocity = std::max(config_.ik.max_joint_velocity_radps, 1e-6);
-      const double max_delta_velocity =
-          std::max(config_.ik.max_joint_acceleration_radps2, 1e-6) * dt;
-      const double rt_alpha = std::clamp(config_.ik.realtime_target_smoothing_alpha, 0.0, 1.0);
-      const double joint_deadzone = std::max(0.0, config_.ik.realtime_joint_deadzone_rad);
-      if (!apply_motion) {
-        prev_command_velocity.fill(0.0);
-        prev_command_velocity_initialized = false;
-      } else if (!prev_command_velocity_initialized) {
-        prev_command_velocity.fill(0.0);
-        prev_command_velocity_initialized = true;
-      }
-      std::array<double, 7> q_cmd = state.q_d;
+      const double rt_alpha = 0.0;
       std::array<double, 7> target_delta{};
       std::array<double, 7> filtered_delta{};
       std::array<double, 7> command_delta{};
       std::array<uint8_t, 7> clamp_saturated{};
+      const std::array<double, 7> q_cmd = trajectory_generator.Update(planned.target_q,
+                                                                      state.q_d,
+                                                                      dt,
+                                                                      apply_motion,
+                                                                      &target_delta,
+                                                                      &filtered_delta,
+                                                                      &command_delta,
+                                                                      &clamp_saturated);
       double max_abs_target_delta = 0.0;
       double max_abs_filtered_delta = 0.0;
       double max_abs_command_delta = 0.0;
       for (size_t i = 0; i < 7; ++i) {
-        target_delta[i] = planned.target_q[i] - state.q_d[i];
-        if (std::abs(target_delta[i]) < joint_deadzone) {
-          target_delta[i] = 0.0;
-        }
-        if (apply_motion) {
-          filtered_delta[i] = rt_alpha * target_delta[i];
-          const double desired_velocity = filtered_delta[i] / dt;
-          const double velocity_limited = std::clamp(desired_velocity, -max_velocity, max_velocity);
-          const double accel_limited_velocity =
-              prev_command_velocity[i] +
-              std::clamp(velocity_limited - prev_command_velocity[i],
-                         -max_delta_velocity,
-                         max_delta_velocity);
-          const double unclamped_delta = accel_limited_velocity * dt;
-          const double clamped_delta = std::clamp(unclamped_delta, -max_step, max_step);
-          q_cmd[i] = state.q_d[i] + clamped_delta;
-          command_delta[i] = clamped_delta;
-          prev_command_velocity[i] = clamped_delta / dt;
-          if (std::abs(unclamped_delta) > max_step + 1e-12) {
-            clamp_saturated[i] = 1;
-          }
-        }
         max_abs_target_delta = std::max(max_abs_target_delta, std::abs(target_delta[i]));
         max_abs_filtered_delta = std::max(max_abs_filtered_delta, std::abs(filtered_delta[i]));
         max_abs_command_delta = std::max(max_abs_command_delta, std::abs(command_delta[i]));
