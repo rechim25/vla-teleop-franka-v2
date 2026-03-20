@@ -38,8 +38,16 @@ teleop:
     singularity_damping_gain: 1.0
   gripper:
     enabled: true
+    command_mode: binary
     max_width_m: 0.08
     min_width_m: 0.0
     speed_mps: 0.05
     min_command_delta_m: 0.002
     max_command_rate_hz: 20.0
+    open_threshold: 0.30
+    close_threshold: 0.70
+    toggle_debounce_s: 0.08
+    stall_width_delta_m: 0.001
+    stall_timeout_s: 0.25
+    width_tolerance_m: 0.002
+    read_failure_timeout_s: 0.50

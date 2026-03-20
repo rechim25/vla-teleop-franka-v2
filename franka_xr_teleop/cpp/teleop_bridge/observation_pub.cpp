@@ -73,7 +73,8 @@ std::string ObservationPublisher::ToJson(const RobotObservation& obs) const {
   ss << "\"tcp_orientation_xyzw\":";
   AppendArray(&ss, obs.tcp_pose.q);
   ss << ',';
-  ss << "\"gripper_width\":" << obs.gripper_width;
+  ss << "\"gripper_width\":" << obs.gripper_width << ',';
+  ss << "\"gripper_state\":\"" << ToString(obs.gripper_state) << "\"";
   ss << "},";
 
   ss << "\"executed_action\":{";
@@ -100,7 +101,8 @@ std::string ObservationPublisher::ToJson(const RobotObservation& obs) const {
   ss << "\"workspace_clamped\":" << (obs.faults.workspace_clamped ? "true" : "false") << ',';
   ss << "\"robot_not_ready\":" << (obs.faults.robot_not_ready ? "true" : "false") << ',';
   ss << "\"control_exception\":" << (obs.faults.control_exception ? "true" : "false") << ',';
-  ss << "\"ik_rejected\":" << (obs.faults.ik_rejected ? "true" : "false");
+  ss << "\"ik_rejected\":" << (obs.faults.ik_rejected ? "true" : "false") << ',';
+  ss << "\"gripper_fault\":" << (obs.faults.gripper_fault ? "true" : "false");
   ss << "}}";
   ss << '}';
 

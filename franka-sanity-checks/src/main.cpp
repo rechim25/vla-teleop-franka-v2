@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <exception>
@@ -7,15 +8,17 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 #include <franka/control_types.h>
 #include <franka/exception.h>
+#include <franka/gripper.h>
 #include <franka/robot.h>
 #include <franka/robot_state.h>
 
 namespace {
 
-enum class Mode { kReadOnly, kTinyMotion, kTinyCartesian, kRecoverOnly };
+enum class Mode { kReadOnly, kTinyMotion, kTinyCartesian, kRecoverOnly, kGripperCheck };
 enum class CartesianAxis { kX, kY, kZ };
 
 struct Options {
@@ -28,22 +31,27 @@ struct Options {
   double delta_m = 0.01;
   double motion_duration_s = 3.0;
   bool auto_recover = false;
+  double gripper_speed_mps = 0.03;
+  double gripper_pause_s = 1.0;
+  bool skip_gripper_homing = false;
 };
 
 void PrintUsage(const char* program) {
   std::cout << "Usage:\n"
             << "  " << program
-            << " --robot-ip <IP> [--mode read-only|tiny-motion|tiny-cartesian|recover-only]\n"
+            << " --robot-ip <IP> [--mode read-only|tiny-motion|tiny-cartesian|recover-only|gripper-check]\n"
             << "             [--read-samples <N>] [--joint-index 0..6]\n"
             << "             [--delta-rad <rad>] [--cart-axis x|y|z] [--delta-m <m>]\n"
-            << "             [--duration-s <sec>] [--auto-recover]\n\n"
+            << "             [--duration-s <sec>] [--auto-recover]\n"
+            << "             [--gripper-speed <m/s>] [--gripper-pause-s <sec>] [--skip-gripper-homing]\n\n"
             << "Examples:\n"
             << "  " << program << " --robot-ip 192.168.2.200 --mode read-only\n"
             << "  " << program
             << " --robot-ip 192.168.2.200 --mode tiny-motion --delta-rad 0.01 --duration-s 3.0\n"
             << "  " << program
             << " --robot-ip 192.168.2.200 --mode tiny-cartesian --cart-axis z --delta-m 0.01 --duration-s 8.0\n"
-            << "  " << program << " --robot-ip 192.168.2.200 --mode recover-only\n";
+            << "  " << program << " --robot-ip 192.168.2.200 --mode recover-only\n"
+            << "  " << program << " --robot-ip 192.168.2.200 --mode gripper-check\n";
 }
 
 bool ParseSize(const std::string& value, size_t* out) {
@@ -99,6 +107,8 @@ bool ParseArgs(int argc, char** argv, Options* options) {
         options->mode = Mode::kTinyCartesian;
       } else if (value == "recover-only") {
         options->mode = Mode::kRecoverOnly;
+      } else if (value == "gripper-check") {
+        options->mode = Mode::kGripperCheck;
       } else {
         std::cerr << "Invalid mode: " << value << "\n";
         return false;
@@ -182,6 +192,33 @@ bool ParseArgs(int argc, char** argv, Options* options) {
       options->auto_recover = true;
       continue;
     }
+    if (arg == "--gripper-speed") {
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value for --gripper-speed\n";
+        return false;
+      }
+      if (!ParseDouble(argv[++i], &options->gripper_speed_mps) ||
+          options->gripper_speed_mps <= 0.0 || options->gripper_speed_mps > 0.2) {
+        std::cerr << "Invalid --gripper-speed (must satisfy 0 < speed <= 0.2)\n";
+        return false;
+      }
+      continue;
+    }
+    if (arg == "--gripper-pause-s") {
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value for --gripper-pause-s\n";
+        return false;
+      }
+      if (!ParseDouble(argv[++i], &options->gripper_pause_s) || options->gripper_pause_s < 0.0) {
+        std::cerr << "Invalid --gripper-pause-s (must be >= 0)\n";
+        return false;
+      }
+      continue;
+    }
+    if (arg == "--skip-gripper-homing") {
+      options->skip_gripper_homing = true;
+      continue;
+    }
 
     if (!arg.empty() && arg[0] != '-' && options->robot_ip.empty()) {
       options->robot_ip = arg;
@@ -217,6 +254,14 @@ void PrintStateSnapshot(const franka::RobotState& state) {
   PrintArray("O_T_EE", state.O_T_EE);
   std::cout << "current_errors: " << state.current_errors << "\n";
   std::cout << "last_motion_errors: " << state.last_motion_errors << "\n";
+}
+
+void PrintGripperStateSnapshot(const std::string& label, const franka::GripperState& state) {
+  std::cout << label << ":\n";
+  std::cout << "  width [m]: " << std::fixed << std::setprecision(6) << state.width << "\n";
+  std::cout << "  max_width [m]: " << std::fixed << std::setprecision(6) << state.max_width << "\n";
+  std::cout << "  is_grasped: " << (state.is_grasped ? "true" : "false") << "\n";
+  std::cout << "  temperature [C]: " << state.temperature << "\n";
 }
 
 void ConfigureConservativeBehavior(franka::Robot& robot) {
@@ -288,6 +333,18 @@ bool ValidateMotionOptions(const Options& options) {
       std::cerr << "Invalid tiny-cartesian speed. |delta-m| / duration-s must be <= 0.01 m/s.\n";
       return false;
     }
+  }
+  return true;
+}
+
+bool ValidateGripperOptions(const Options& options) {
+  if (options.gripper_speed_mps <= 0.0 || options.gripper_speed_mps > 0.2) {
+    std::cerr << "Invalid --gripper-speed. Safety limit is 0 < speed <= 0.2 m/s.\n";
+    return false;
+  }
+  if (options.gripper_pause_s < 0.0 || options.gripper_pause_s > 10.0) {
+    std::cerr << "Invalid --gripper-pause-s. Safety limit is 0 <= pause <= 10 seconds.\n";
+    return false;
   }
   return true;
 }
@@ -430,6 +487,72 @@ void RunTinyCartesian(franka::Robot& robot, const Options& options) {
   std::cout << "last_motion_errors: " << final_state.last_motion_errors << "\n";
 }
 
+void SleepForSeconds(double duration_s) {
+  if (duration_s <= 0.0) {
+    return;
+  }
+  std::this_thread::sleep_for(
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::duration<double>(duration_s)));
+}
+
+void RunGripperCheck(const Options& options) {
+  if (!ValidateGripperOptions(options)) {
+    throw std::runtime_error("Invalid gripper options");
+  }
+
+  franka::Gripper gripper(options.robot_ip);
+  std::cout << "Connected to gripper at " << options.robot_ip << "\n";
+  std::cout << "Gripper server version: " << gripper.serverVersion() << "\n";
+
+  franka::GripperState state = gripper.readOnce();
+  PrintGripperStateSnapshot("Initial gripper state", state);
+
+  if (!options.skip_gripper_homing) {
+    std::cout << "Running gripper homing...\n";
+    const bool homing_ok = gripper.homing();
+    std::cout << "  homing result: " << (homing_ok ? "success" : "failure") << "\n";
+    state = gripper.readOnce();
+    PrintGripperStateSnapshot("Post-homing gripper state", state);
+    if (!homing_ok) {
+      throw std::runtime_error("Gripper homing returned false");
+    }
+  }
+
+  if (state.max_width <= 1e-4) {
+    throw std::runtime_error(
+        "Gripper max_width is not initialized. Initialize the end effector in Franka Desk first.");
+  }
+
+  const double open_width_m = state.max_width;
+  constexpr double kClosedWidthM = 0.0;
+
+  std::cout << "Commanding open move to " << open_width_m << " m at "
+            << options.gripper_speed_mps << " m/s...\n";
+  if (!gripper.move(open_width_m, options.gripper_speed_mps)) {
+    throw std::runtime_error("Gripper open move returned false");
+  }
+  SleepForSeconds(options.gripper_pause_s);
+  PrintGripperStateSnapshot("After open move", gripper.readOnce());
+
+  std::cout << "Commanding close move to " << kClosedWidthM << " m at "
+            << options.gripper_speed_mps << " m/s...\n";
+  if (!gripper.move(kClosedWidthM, options.gripper_speed_mps)) {
+    throw std::runtime_error("Gripper close move returned false");
+  }
+  SleepForSeconds(options.gripper_pause_s);
+  PrintGripperStateSnapshot("After close move", gripper.readOnce());
+
+  std::cout << "Commanding reopen move to " << open_width_m << " m at "
+            << options.gripper_speed_mps << " m/s...\n";
+  if (!gripper.move(open_width_m, options.gripper_speed_mps)) {
+    throw std::runtime_error("Gripper reopen move returned false");
+  }
+  SleepForSeconds(options.gripper_pause_s);
+  PrintGripperStateSnapshot("Final gripper state", gripper.readOnce());
+
+  std::cout << "Gripper-check mode completed successfully.\n";
+}
+
 int Execute(const Options& options) {
   franka::Robot robot(options.robot_ip);
 
@@ -446,6 +569,11 @@ int Execute(const Options& options) {
 
   if (options.mode == Mode::kReadOnly) {
     RunReadOnly(robot, options);
+    return EXIT_SUCCESS;
+  }
+
+  if (options.mode == Mode::kGripperCheck) {
+    RunGripperCheck(options);
     return EXIT_SUCCESS;
   }
 

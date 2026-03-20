@@ -162,11 +162,24 @@ bool LoadTeleopConfig(const std::string& path, AppConfig* config, std::string* e
 
   if (const YAML::Node gripper = teleop["gripper"]; gripper && gripper.IsMap()) {
     ReadScalar(gripper, "enabled", &config->bridge.gripper.enabled);
+    std::string command_mode;
+    if (ReadScalar(gripper, "command_mode", &command_mode) &&
+        !ParseGripperCommandMode(command_mode, &config->bridge.gripper.command_mode)) {
+      *error = "Unsupported teleop.gripper.command_mode '" + command_mode + "' in " + path;
+      return false;
+    }
     ReadScalar(gripper, "max_width_m", &config->bridge.gripper.max_width_m);
     ReadScalar(gripper, "min_width_m", &config->bridge.gripper.min_width_m);
     ReadScalar(gripper, "speed_mps", &config->bridge.gripper.speed_mps);
     ReadScalar(gripper, "min_command_delta_m", &config->bridge.gripper.min_command_delta_m);
     ReadScalar(gripper, "max_command_rate_hz", &config->bridge.gripper.max_command_rate_hz);
+    ReadScalar(gripper, "open_threshold", &config->bridge.gripper.open_threshold);
+    ReadScalar(gripper, "close_threshold", &config->bridge.gripper.close_threshold);
+    ReadScalar(gripper, "toggle_debounce_s", &config->bridge.gripper.toggle_debounce_s);
+    ReadScalar(gripper, "stall_width_delta_m", &config->bridge.gripper.stall_width_delta_m);
+    ReadScalar(gripper, "stall_timeout_s", &config->bridge.gripper.stall_timeout_s);
+    ReadScalar(gripper, "width_tolerance_m", &config->bridge.gripper.width_tolerance_m);
+    ReadScalar(gripper, "read_failure_timeout_s", &config->bridge.gripper.read_failure_timeout_s);
   }
 
   return true;
@@ -270,6 +283,48 @@ bool LoadAppConfig(const std::string& config_dir, AppConfig* config, std::string
   if (config->bridge.gripper.min_width_m < 0.0 ||
       config->bridge.gripper.max_width_m < config->bridge.gripper.min_width_m) {
     *error = "Invalid gripper width range";
+    return false;
+  }
+  if (config->bridge.gripper.min_command_delta_m < 0.0) {
+    *error = "teleop.gripper.min_command_delta_m must be >= 0";
+    return false;
+  }
+  if (config->bridge.gripper.max_command_rate_hz <= 0.0) {
+    *error = "teleop.gripper.max_command_rate_hz must be > 0";
+    return false;
+  }
+  if (config->bridge.gripper.open_threshold < 0.0 ||
+      config->bridge.gripper.open_threshold > 1.0) {
+    *error = "teleop.gripper.open_threshold must be in [0, 1]";
+    return false;
+  }
+  if (config->bridge.gripper.close_threshold < 0.0 ||
+      config->bridge.gripper.close_threshold > 1.0) {
+    *error = "teleop.gripper.close_threshold must be in [0, 1]";
+    return false;
+  }
+  if (config->bridge.gripper.open_threshold > config->bridge.gripper.close_threshold) {
+    *error = "teleop.gripper.open_threshold must be <= teleop.gripper.close_threshold";
+    return false;
+  }
+  if (config->bridge.gripper.toggle_debounce_s < 0.0) {
+    *error = "teleop.gripper.toggle_debounce_s must be >= 0";
+    return false;
+  }
+  if (config->bridge.gripper.stall_width_delta_m < 0.0) {
+    *error = "teleop.gripper.stall_width_delta_m must be >= 0";
+    return false;
+  }
+  if (config->bridge.gripper.stall_timeout_s < 0.0) {
+    *error = "teleop.gripper.stall_timeout_s must be >= 0";
+    return false;
+  }
+  if (config->bridge.gripper.width_tolerance_m < 0.0) {
+    *error = "teleop.gripper.width_tolerance_m must be >= 0";
+    return false;
+  }
+  if (config->bridge.gripper.read_failure_timeout_s < 0.0) {
+    *error = "teleop.gripper.read_failure_timeout_s must be >= 0";
     return false;
   }
   if (config->bridge.safety.max_translation_speed_mps <= 0.0) {

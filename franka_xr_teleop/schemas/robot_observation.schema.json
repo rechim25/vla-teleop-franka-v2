@@ -8,7 +8,7 @@
     "timestamp_ns": {"type": "integer", "minimum": 0},
     "robot_state": {
       "type": "object",
-      "required": ["q", "dq", "tcp_position_xyz", "tcp_orientation_xyzw", "gripper_width"],
+      "required": ["q", "dq", "tcp_position_xyz", "tcp_orientation_xyzw", "gripper_width", "gripper_state"],
       "properties": {
         "q": {"type": "array", "items": {"type": "number"}, "minItems": 7, "maxItems": 7},
         "dq": {"type": "array", "items": {"type": "number"}, "minItems": 7, "maxItems": 7},
@@ -24,7 +24,8 @@
           "minItems": 4,
           "maxItems": 4
         },
-        "gripper_width": {"type": "number"}
+        "gripper_width": {"type": "number"},
+        "gripper_state": {"type": "string"}
       }
     },
     "executed_action": {

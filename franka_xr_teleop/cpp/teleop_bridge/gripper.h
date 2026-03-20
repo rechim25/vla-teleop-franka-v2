@@ -2,22 +2,21 @@
 
 #include <cstdint>
 
+#include "common_types.h"
+
 namespace teleop {
 
 class GripperController {
  public:
   GripperController() = default;
 
-  // Returns filtered command in [0, 1].
-  double Update(double desired_command, uint64_t now_ns, double dt_s);
-  void Reset(double initial = 1.0);
+  // Returns the desired high-level gripper state from the XR input.
+  GripperState UpdateDesiredState(const GripperConfig& config, double desired_command, uint64_t now_ns);
+  void Reset(GripperState initial = GripperState::kOpen);
 
  private:
-  double current_ = 1.0;
+  GripperState current_ = GripperState::kOpen;
   uint64_t last_toggle_time_ns_ = 0;
-
-  double max_rate_per_s_ = 2.0;
-  double debounce_s_ = 0.08;
 };
 
 }  // namespace teleop

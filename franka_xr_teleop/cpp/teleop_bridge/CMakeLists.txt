@@ -105,6 +105,7 @@ add_executable(franka_xr_teleop_bridge
   xrobotics_source.cpp
   teleop_mapper.cpp
   teleop_state_machine.cpp
+  gripper.cpp
   franka_controller.cpp
   safety.cpp
   observation_pub.cpp

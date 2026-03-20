@@ -23,6 +23,18 @@ enum class ControlMode : uint8_t {
   kPose = 2,
 };
 
+enum class GripperCommandMode : uint8_t {
+  kAnalog = 0,
+  kBinary = 1,
+};
+
+enum class GripperState : uint8_t {
+  kOpen = 0,
+  kClose = 1,
+  kHold = 2,
+  kFault = 3,
+};
+
 inline const char* ToString(ControlMode mode) {
   switch (mode) {
     case ControlMode::kHold:
@@ -51,6 +63,32 @@ inline bool ParseControlMode(std::string_view value, ControlMode* mode) {
   return false;
 }
 
+inline bool ParseGripperCommandMode(std::string_view value, GripperCommandMode* mode) {
+  if (value == "analog") {
+    *mode = GripperCommandMode::kAnalog;
+    return true;
+  }
+  if (value == "binary") {
+    *mode = GripperCommandMode::kBinary;
+    return true;
+  }
+  return false;
+}
+
+inline const char* ToString(GripperState state) {
+  switch (state) {
+    case GripperState::kOpen:
+      return "OPEN";
+    case GripperState::kClose:
+      return "CLOSE";
+    case GripperState::kHold:
+      return "HOLD";
+    case GripperState::kFault:
+      return "FAULT";
+  }
+  return "UNKNOWN";
+}
+
 struct Pose {
   std::array<double, 3> p{};
   std::array<double, 4> q{{0.0, 0.0, 0.0, 1.0}};  // xyzw
@@ -70,7 +108,7 @@ struct XRCommand {
 struct TeleopAction {
   std::array<double, 3> delta_translation_m{};
   std::array<double, 3> delta_rotation_rad{};  // angle-axis
-  double gripper_command = 1.0;                // normalized trigger in [0, 1]
+  double gripper_command = 0.0;                // normalized gripper state in [0, 1]
 };
 
 struct FaultFlags {
@@ -80,6 +118,7 @@ struct FaultFlags {
   bool robot_not_ready = false;
   bool control_exception = false;
   bool ik_rejected = false;
+  bool gripper_fault = false;
 };
 
 struct RobotSnapshot {
@@ -116,6 +155,7 @@ struct RobotObservation {
   std::array<double, 7> dq{};
   Pose tcp_pose{};
   double gripper_width = 0.0;
+  GripperState gripper_state = GripperState::kOpen;
   TeleopAction executed_action{};
   ControlMode control_mode = ControlMode::kHold;
   TeleopState teleop_state = TeleopState::kDisconnected;
@@ -158,11 +198,19 @@ struct TeleopRuntimeConfig {
 
 struct GripperConfig {
   bool enabled = true;
+  GripperCommandMode command_mode = GripperCommandMode::kBinary;
   double max_width_m = 0.08;
   double min_width_m = 0.0;
   double speed_mps = 0.05;
   double min_command_delta_m = 0.002;
   double max_command_rate_hz = 20.0;
+  double open_threshold = 0.30;
+  double close_threshold = 0.70;
+  double toggle_debounce_s = 0.08;
+  double stall_width_delta_m = 0.001;
+  double stall_timeout_s = 0.25;
+  double width_tolerance_m = 0.002;
+  double read_failure_timeout_s = 0.50;
 };
 
 struct IkConfig {

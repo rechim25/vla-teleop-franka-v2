@@ -6,6 +6,7 @@ Thumbs.db
 
 # CMake / C++ build artifacts
 build/
+build_gripper_check
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt

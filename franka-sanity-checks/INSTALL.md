@@ -74,6 +74,12 @@ Clear Reflex mode only (no motion):
 ./build/panda_libfranka_sanity --robot-ip 192.168.2.200 --mode recover-only
 ```
 
+Gripper check:
+
+```bash
+./build/panda_libfranka_sanity --robot-ip 192.168.2.200 --mode gripper-check
+```
+
 ## Notes
 
 - Use `libfranka` version `0.9.2` (allowed: `>=0.9.1` and `<0.10.0`).

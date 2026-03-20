@@ -6,6 +6,7 @@ It is for bring-up and safety validation before future teleoperation development
 This project provides a standalone C++ executable to verify:
 - connectivity to a Franka Panda controller,
 - basic state reads (`readOnce()` + `read()`),
+- end-effector / gripper initialization and open-close checks,
 - tiny smooth joint-space and Cartesian-space commands using `libfranka` (no ROS).
 
 It is intentionally minimal and aimed at a first safety/sanity milestone before teleoperation and data collection.
@@ -37,6 +38,7 @@ Follow [INSTALL.md](./INSTALL.md) first. It includes:
   - `tiny-motion`: one tiny smooth joint-space move from current state
   - `tiny-cartesian`: one tiny smooth Cartesian translation with fixed elbow configuration
   - `recover-only`: one-shot `automaticErrorRecovery()` when robot is in Reflex mode
+  - `gripper-check`: connect to `franka::Gripper`, optionally home, then open-close-reopen once
 - Before motion, explicitly configures:
   - `setCollisionBehavior(...)`
   - `setJointImpedance(...)`
@@ -115,6 +117,18 @@ Clear Reflex mode only (no motion):
 
 ```bash
 ./build/panda_libfranka_sanity --robot-ip 192.168.2.200 --mode recover-only
+```
+
+Gripper check directly:
+
+```bash
+./build/panda_libfranka_sanity --robot-ip 192.168.2.200 --mode gripper-check
+```
+
+Gripper check with wrapper script:
+
+```bash
+scripts/check_gripper.sh --robot-ip 192.168.2.200
 ```
 
 If you see `communication_constraints_violation` and the robot enters `robot_mode: "Reflex"`, run `recover-only` first, then re-run `read-only`, then `tiny-motion`.

@@ -121,6 +121,7 @@ def main() -> int:
             tcp = safe_get(robot, "tcp_position_xyz", default=[0.0, 0.0, 0.0])
             dq = safe_get(robot, "dq", default=[0.0] * 7)
             gripper_width = float(safe_get(robot, "gripper_width", default=0.0))
+            gripper_state = safe_get(robot, "gripper_state", default="N/A")
 
             dpos = safe_get(action, "cartesian_delta_translation", default=[0.0, 0.0, 0.0])
             drot = safe_get(action, "cartesian_delta_rotation", default=[0.0, 0.0, 0.0])
@@ -147,6 +148,7 @@ def main() -> int:
                         f"|drot|={drot_n:.4f}rad",
                         f"dq_max={dq_max:.4f}",
                         f"grip_cmd={grip_cmd:.3f}",
+                        f"grip_state={gripper_state}",
                         f"grip_w={gripper_width:.3f}m",
                         f"manip={manip:.5f}",
                         f"faults={format_faults(faults)}",

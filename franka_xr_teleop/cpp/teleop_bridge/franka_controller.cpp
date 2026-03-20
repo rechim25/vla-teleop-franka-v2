@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -22,6 +23,7 @@
 #include <franka/robot.h>
 #include <franka/robot_state.h>
 
+#include "gripper.h"
 #include "math_utils.h"
 #include "safety.h"
 #include "teleop_mapper.h"
@@ -168,6 +170,20 @@ double MapTriggerToWidth(const GripperConfig& config, double trigger) {
 
 double ClampWidth(const GripperConfig& config, double width) {
   return std::clamp(width, config.min_width_m, config.max_width_m);
+}
+
+double MapStateToWidth(const GripperConfig& config, GripperState state) {
+  return state == GripperState::kClose ? config.min_width_m : config.max_width_m;
+}
+
+bool GripperStateSatisfiesDesired(GripperState actual, GripperState desired) {
+  if (desired == GripperState::kOpen) {
+    return actual == GripperState::kOpen;
+  }
+  if (desired == GripperState::kClose) {
+    return actual == GripperState::kClose || actual == GripperState::kHold;
+  }
+  return actual == desired;
 }
 
 Eigen::Matrix<double, 6, 7> JacobianToEigen(const std::array<double, 42>& jacobian_col_major) {
@@ -440,13 +456,15 @@ void PlannerLoop(const TeleopBridgeConfig& config,
                  LatestPlannedTargetBuffer* planned_target_buffer,
                  TraceRecorder* trace_recorder,
                  uint32_t trace_decimation,
-                 std::atomic<double>* desired_gripper_width_m,
+                 std::atomic<GripperState>* desired_gripper_state,
                  std::atomic<bool>* stop_requested) {
   try {
     const auto sleep_period =
         std::chrono::microseconds(static_cast<int64_t>(1e6 / config.teleop.planner_rate_hz));
 
     SafetyFilter safety(config.safety, config.teleop.planner_rate_hz);
+    GripperController gripper_controller;
+    gripper_controller.Reset(GripperState::kOpen);
     TeleopMapper mapper(config);
     TeleopStateMachine state_machine;
     bool deadman_latched = false;
@@ -466,9 +484,12 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       planned.target_q = robot.q;
       planned.desired_tcp_pose = robot.tcp_pose;
       planned.control_mode = ControlMode::kHold;
-      planned.target_gripper_width_m = MapTriggerToWidth(config.gripper, xr_cmd.gripper_trigger_value);
-      planned.requested_action.gripper_command = Clamp01(xr_cmd.gripper_trigger_value);
-      desired_gripper_width_m->store(planned.target_gripper_width_m, std::memory_order_release);
+      const GripperState desired_state =
+          gripper_controller.UpdateDesiredState(config.gripper, xr_cmd.gripper_trigger_value, now_ns);
+      const double gripper_command = desired_state == GripperState::kClose ? 1.0 : 0.0;
+      planned.target_gripper_width_m = MapStateToWidth(config.gripper, desired_state);
+      planned.requested_action.gripper_command = gripper_command;
+      desired_gripper_state->store(desired_state, std::memory_order_release);
       const double control_value = Clamp01(xr_cmd.control_trigger_value);
 
       bool has_target = false;
@@ -572,6 +593,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
                                             &desired_pose,
                                             &requested_action);
       planned.requested_action = requested_action;
+      planned.requested_action.gripper_command = gripper_command;
       if (!has_target) {
         planned.control_mode = ControlMode::kHold;
         planned_target_buffer->Publish(planned);
@@ -621,40 +643,194 @@ void PlannerLoop(const TeleopBridgeConfig& config,
 
 void GripperLoop(franka::Gripper* gripper,
                  const GripperConfig& config,
-                 const std::atomic<double>* desired_gripper_width_m,
+                 const std::atomic<GripperState>* desired_gripper_state,
+                 std::atomic<GripperState>* active_gripper_state,
                  std::atomic<double>* measured_gripper_width_m,
                  std::atomic<bool>* stop_requested) {
   try {
-    const double min_period_s = 1.0 / std::max(config.max_command_rate_hz, 1.0);
-    double last_sent_width = ClampWidth(config, desired_gripper_width_m->load(std::memory_order_acquire));
-    uint64_t last_command_time_ns = 0;
+    franka::GripperState measured_state = gripper->readOnce();
+    measured_gripper_width_m->store(measured_state.width, std::memory_order_release);
+
+    GripperState current_state =
+        measured_state.width >= (config.max_width_m - config.width_tolerance_m) ? GripperState::kOpen
+                                                                                 : GripperState::kHold;
+    active_gripper_state->store(current_state, std::memory_order_release);
+
+    bool action_in_progress = false;
+    GripperState action_target_state = current_state;
+    std::future<bool> action_future;
+    bool action_abort_expected = false;
+    const char* action_abort_reason = "";
+    double stall_reference_width = measured_state.width;
+    uint64_t last_width_progress_ns = MonotonicNowNs();
+    uint64_t last_successful_read_ns = last_width_progress_ns;
+
+    auto set_state = [&](GripperState next_state, const char* reason) {
+      if (current_state != next_state) {
+        std::cout << "Gripper state " << ToString(current_state) << " -> " << ToString(next_state)
+                  << " reason=" << reason << "\n";
+      }
+      current_state = next_state;
+      active_gripper_state->store(current_state, std::memory_order_release);
+    };
+
+    auto wait_for_action_completion = [&]() -> bool {
+      if (!action_in_progress) {
+        return true;
+      }
+      try {
+        (void)action_future.get();
+      } catch (const std::exception& e) {
+        if (action_abort_expected) {
+          std::cout << "Gripper action preempted: reason=" << action_abort_reason << "\n";
+          action_in_progress = false;
+          action_abort_expected = false;
+          action_abort_reason = "";
+          return true;
+        }
+        std::cerr << "Gripper action completion failed: " << e.what() << "\n";
+        set_state(GripperState::kFault, "action_completion_exception");
+        action_in_progress = false;
+        return false;
+      }
+      action_in_progress = false;
+      action_abort_expected = false;
+      action_abort_reason = "";
+      return true;
+    };
+
+    auto preempt_action = [&](const char* reason) -> bool {
+      if (!action_in_progress) {
+        return true;
+      }
+      action_abort_expected = true;
+      action_abort_reason = reason;
+      try {
+        (void)gripper->stop();
+      } catch (const std::exception& e) {
+        std::cerr << "Gripper stop failed during preemption: " << e.what() << "\n";
+        set_state(GripperState::kFault, "preempt_stop_failed");
+        action_in_progress = false;
+        action_abort_expected = false;
+        action_abort_reason = "";
+        return false;
+      }
+      return wait_for_action_completion();
+    };
+
+    auto start_action = [&](GripperState target_state, uint64_t now_ns) {
+      const double target_width = MapStateToWidth(config, target_state);
+      action_target_state = target_state;
+      action_abort_expected = false;
+      action_abort_reason = "";
+      stall_reference_width = measured_state.width;
+      last_width_progress_ns = now_ns;
+      action_future = std::async(std::launch::async, [gripper, target_width, speed = config.speed_mps]() {
+        return gripper->move(target_width, speed);
+      });
+      action_in_progress = true;
+      set_state(target_state, target_state == GripperState::kOpen ? "command_open" : "command_close");
+    };
 
     while (!stop_requested->load(std::memory_order_acquire)) {
       const uint64_t now_ns = MonotonicNowNs();
-      const double desired_width = ClampWidth(
-          config, desired_gripper_width_m->load(std::memory_order_acquire));
-      const double elapsed_s = last_command_time_ns == 0
-                                   ? std::numeric_limits<double>::infinity()
-                                   : static_cast<double>(now_ns - last_command_time_ns) * 1e-9;
+      const GripperState desired_state = desired_gripper_state->load(std::memory_order_acquire);
 
-      if (std::abs(desired_width - last_sent_width) >= config.min_command_delta_m &&
-          elapsed_s >= min_period_s) {
+      try {
+        measured_state = gripper->readOnce();
+        measured_gripper_width_m->store(measured_state.width, std::memory_order_release);
+        last_successful_read_ns = now_ns;
+      } catch (const std::exception& e) {
+        if (static_cast<double>(now_ns - last_successful_read_ns) * 1e-9 >=
+            config.read_failure_timeout_s) {
+          std::cerr << "Gripper read failed persistently: " << e.what() << "\n";
+          set_state(GripperState::kFault, "read_failure_timeout");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        continue;
+      }
+
+      if (action_in_progress && action_future.valid() &&
+          action_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
         try {
-          (void)gripper->move(desired_width, config.speed_mps);
-          last_sent_width = desired_width;
-          last_command_time_ns = now_ns;
+          const bool success = action_future.get();
+          action_in_progress = false;
+          action_abort_expected = false;
+          action_abort_reason = "";
+          if (current_state != GripperState::kFault) {
+            if (action_target_state == GripperState::kOpen) {
+              if (success || measured_state.width >= (config.max_width_m - config.width_tolerance_m)) {
+                set_state(GripperState::kOpen, "open_complete");
+              } else {
+                std::cerr << "Gripper open command returned false.\n";
+                set_state(GripperState::kFault, "open_failed");
+              }
+            } else if (action_target_state == GripperState::kClose) {
+              if (success || measured_state.width <= (config.min_width_m + config.width_tolerance_m)) {
+                set_state(GripperState::kClose, "close_complete");
+              } else {
+                set_state(GripperState::kHold, "close_contact");
+              }
+            }
+          }
         } catch (const std::exception& e) {
-          std::cerr << "Gripper command failed: " << e.what() << "\n";
+          if (action_abort_expected) {
+            std::cout << "Gripper action preempted: reason=" << action_abort_reason << "\n";
+            action_in_progress = false;
+            action_abort_expected = false;
+            action_abort_reason = "";
+          } else {
+            std::cerr << "Gripper command failed: " << e.what() << "\n";
+            set_state(GripperState::kFault, "command_exception");
+          }
         }
       }
 
-      try {
-        const franka::GripperState state = gripper->readOnce();
-        measured_gripper_width_m->store(state.width, std::memory_order_release);
-      } catch (const std::exception&) {
+      if (current_state == GripperState::kFault) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        continue;
+      }
+
+      if (action_in_progress) {
+        if (desired_state == GripperState::kOpen && action_target_state != GripperState::kOpen) {
+          if (!preempt_action("latest_open")) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+          }
+        } else if (desired_state == GripperState::kClose && action_target_state != GripperState::kClose) {
+          if (!preempt_action("latest_close")) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+          }
+        } else if (action_target_state == GripperState::kClose) {
+          const double width_delta = std::abs(measured_state.width - stall_reference_width);
+          if (width_delta >= config.stall_width_delta_m) {
+            stall_reference_width = measured_state.width;
+            last_width_progress_ns = now_ns;
+          } else if (measured_state.width > (config.min_width_m + config.width_tolerance_m) &&
+                     static_cast<double>(now_ns - last_width_progress_ns) * 1e-9 >=
+                         config.stall_timeout_s) {
+            if (!preempt_action("close_stall")) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(20));
+              continue;
+            }
+            if (current_state != GripperState::kFault) {
+              set_state(GripperState::kHold, "close_stall");
+            }
+          }
+        }
+      }
+
+      if (!action_in_progress && current_state != GripperState::kFault &&
+          !GripperStateSatisfiesDesired(current_state, desired_state)) {
+        start_action(desired_state, now_ns);
       }
 
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    if (action_in_progress) {
+      (void)preempt_action("shutdown");
     }
   } catch (const std::exception& e) {
     std::cerr << "Gripper thread exception: " << e.what() << "\n";
@@ -728,8 +904,24 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
     if (config_.gripper.enabled) {
       try {
         gripper = std::make_unique<franka::Gripper>(options_.robot_ip);
-        const franka::GripperState state = gripper->readOnce();
+        franka::GripperState state = gripper->readOnce();
+        if (state.max_width <= 1e-4) {
+          std::cout << "Gripper max_width unavailable, running homing...\n";
+          if (!gripper->homing()) {
+            std::cerr << "Gripper homing returned false.\n";
+          }
+          state = gripper->readOnce();
+        }
+        if (state.max_width > 1e-4) {
+          config_.gripper.max_width_m = std::min(config_.gripper.max_width_m, state.max_width);
+        }
         measured_gripper_width_m.store(state.width, std::memory_order_release);
+        std::cout << "Gripper ready: width=" << state.width
+                  << " max_width=" << state.max_width
+                  << " command_mode="
+                  << (config_.gripper.command_mode == GripperCommandMode::kBinary ? "binary"
+                                                                                  : "analog")
+                  << "\n";
       } catch (const std::exception& e) {
         std::cerr << "Gripper unavailable, continuing without gripper control: " << e.what() << "\n";
         gripper.reset();
@@ -762,7 +954,18 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
     initial_plan.teleop_state = TeleopState::kDisconnected;
     planned_target_buffer.Publish(initial_plan);
 
-    std::atomic<double> desired_gripper_width_m{config_.gripper.max_width_m};
+    std::atomic<GripperState> desired_gripper_state{GripperState::kOpen};
+    const GripperState initial_gripper_state = !config_.gripper.enabled
+                                                   ? GripperState::kOpen
+                                                   : (gripper == nullptr
+                                                          ? GripperState::kFault
+                                                          : (measured_gripper_width_m.load(
+                                                                     std::memory_order_acquire) >=
+                                                                     (config_.gripper.max_width_m -
+                                                                      config_.gripper.width_tolerance_m)
+                                                                 ? GripperState::kOpen
+                                                                 : GripperState::kHold));
+    std::atomic<GripperState> active_gripper_state{initial_gripper_state};
     planner_thread = std::thread(PlannerLoop,
                                  std::cref(config_),
                                  std::cref(model),
@@ -771,16 +974,20 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
                                  &planned_target_buffer,
                                  trace_recorder.get(),
                                  std::max<uint32_t>(1, options_.trace.planner_decimation),
-                                 &desired_gripper_width_m,
+                                 &desired_gripper_state,
                                  stop_requested);
 
     if (gripper != nullptr && config_.allow_motion) {
+      std::cout << "Gripper control thread started.\n";
       gripper_thread = std::thread(GripperLoop,
                                    gripper.get(),
                                    std::cref(config_.gripper),
-                                   &desired_gripper_width_m,
+                                   &desired_gripper_state,
+                                   &active_gripper_state,
                                    &measured_gripper_width_m,
                                    stop_requested);
+    } else if (gripper != nullptr) {
+      std::cout << "Gripper control disabled because allow_motion=false.\n";
     }
 
     uint64_t rt_last_ns = 0;
@@ -842,6 +1049,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       obs.dq = state.dq;
       obs.tcp_pose = MatrixToPose(state.O_T_EE);
       obs.gripper_width = measured_gripper_width_m.load(std::memory_order_acquire);
+      obs.gripper_state = active_gripper_state.load(std::memory_order_acquire);
       obs.executed_action = planned.requested_action;
       obs.control_mode = planned.teleop_active ? planned.control_mode : ControlMode::kHold;
       obs.teleop_state = planned.teleop_state;
@@ -853,6 +1061,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       obs.target_manipulability = planned.manipulability;
       obs.faults = planned.faults;
       obs.faults.robot_not_ready = obs.faults.robot_not_ready || !robot_snapshot.robot_ok;
+      obs.faults.gripper_fault = obs.faults.gripper_fault || obs.gripper_state == GripperState::kFault;
       observation_buffer_->Publish(obs);
 
       if (trace_recorder != nullptr && ((rt_trace_counter++ % rt_trace_decimation) == 0)) {
