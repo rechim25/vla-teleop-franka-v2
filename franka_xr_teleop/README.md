@@ -124,6 +124,17 @@ Live teleop:
   --obs-port 28081
 ```
 
+Save the robot's current joint positions as the startup home pose:
+
+```bash
+./build/cpp/teleop_bridge/franka_xr_teleop_bridge \
+  --robot-ip 192.168.2.200 \
+  --save-home
+```
+
+This reads the current measured joint state and updates `configs/teleop.yaml` at
+`teleop.start_joint_positions_rad`. No motion is commanded in this mode.
+
 Hold-only mode (data path active, no robot motion):
 
 ```bash

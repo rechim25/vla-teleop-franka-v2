@@ -2,9 +2,13 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
+
+#include <franka/robot.h>
 
 #include "common_types.h"
 #include "config_loader.h"
@@ -38,18 +42,20 @@ struct Options {
   std::string trace_dir = "teleop_trace";
   uint32_t trace_planner_decimation = 1;
   uint32_t trace_rt_decimation = 1;
+  bool save_home = false;
 };
 
 void PrintUsage(const char* prog) {
   std::cout << "Usage:\n"
             << "  " << prog << " [--config-dir configs] [--dry-run] [--no-motion]\n"
             << "             [--robot-ip <ip>] [--obs-ip <ip>] [--obs-port <port>]\n"
-            << "             [--control-mode <pose|position>]\n"
+            << "             [--control-mode <pose|position>] [--save-home]\n"
             << "             [--trace-dir <dir>] [--trace-planner-decimation <N>] "
                "[--trace-rt-decimation <N>]\n\n"
             << "Examples:\n"
             << "  " << prog << " --dry-run\n"
             << "  " << prog << " --robot-ip 192.168.2.200 --control-mode position\n"
+            << "  " << prog << " --robot-ip 192.168.2.200 --save-home\n"
             << "  " << prog << " --robot-ip 192.168.2.200 --trace-dir trace_run_01\n";
 }
 
@@ -138,6 +144,10 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       }
       continue;
     }
+    if (arg == "--save-home") {
+      out->save_home = true;
+      continue;
+    }
     if (arg == "-h" || arg == "--help") {
       PrintUsage(argv[0]);
       std::exit(0);
@@ -153,6 +163,19 @@ uint64_t MonotonicNowNs() {
       std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
 }
 
+std::string FormatJointPositions(const std::array<double, 7>& q) {
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(8) << "[";
+  for (size_t i = 0; i < q.size(); ++i) {
+    if (i != 0) {
+      out << ", ";
+    }
+    out << q[i];
+  }
+  out << "]";
+  return out.str();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -164,6 +187,7 @@ int main(int argc, char** argv) {
 
   teleop::AppConfig config;
   std::string config_error;
+  std::string resolved_config_dir = options.config_dir;
   if (!teleop::LoadAppConfig(options.config_dir, &config, &config_error)) {
     if (options.config_dir == "configs") {
       const std::string fallback_config_dir = "franka_xr_teleop/configs";
@@ -171,6 +195,7 @@ int main(int argc, char** argv) {
         std::cerr << "Config error: " << config_error << "\n";
         return 1;
       }
+      resolved_config_dir = fallback_config_dir;
     } else {
       std::cerr << "Config error: " << config_error << "\n";
       return 1;
@@ -194,6 +219,26 @@ int main(int argc, char** argv) {
   }
   if (options.control_mode_override) {
     config.bridge.teleop.control_mode = options.control_mode;
+  }
+
+  if (options.save_home) {
+    try {
+      franka::Robot robot(config.bridge.robot_ip);
+      const franka::RobotState state = robot.readOnce();
+      if (!teleop::SaveStartJointPositions(
+              resolved_config_dir, state.q, &config_error)) {
+        std::cerr << "Failed to save home configuration: " << config_error << "\n";
+        return 3;
+      }
+
+      std::cout << "Saved teleop.start_joint_positions_rad to " << resolved_config_dir
+                << "/teleop.yaml = " << FormatJointPositions(state.q) << "\n";
+      return 0;
+    } catch (const std::exception& e) {
+      std::cerr << "Failed to read current robot joints from " << config.bridge.robot_ip << ": "
+                << e.what() << "\n";
+      return 3;
+    }
   }
 
   std::signal(SIGINT, HandleSignal);

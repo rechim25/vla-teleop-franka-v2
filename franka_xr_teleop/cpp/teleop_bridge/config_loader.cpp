@@ -1,6 +1,7 @@
 #include "config_loader.h"
 
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 
 #include <yaml-cpp/yaml.h>
@@ -395,6 +396,53 @@ bool LoadAppConfig(const std::string& config_dir, AppConfig* config, std::string
     *error = "teleop.ik.task_rotation_deadband_rad must be >= 0";
     return false;
   }
+  return true;
+}
+
+bool SaveStartJointPositions(const std::string& config_dir,
+                             const std::array<double, 7>& start_joint_positions_rad,
+                             std::string* error) {
+  const std::string path = JoinPath(config_dir, "teleop.yaml");
+
+  try {
+    YAML::Node root = YAML::LoadFile(path);
+    YAML::Node teleop = root["teleop"];
+    if (!teleop || !teleop.IsMap()) {
+      *error = "Missing 'teleop' map in " + path;
+      return false;
+    }
+
+    YAML::Node start_joint_positions(YAML::NodeType::Sequence);
+    start_joint_positions.SetStyle(YAML::EmitterStyle::Flow);
+    for (const double joint_position : start_joint_positions_rad) {
+      start_joint_positions.push_back(joint_position);
+    }
+    teleop["start_joint_positions_rad"] = start_joint_positions;
+
+    YAML::Emitter emitter;
+    emitter.SetIndent(2);
+    emitter << root;
+    if (!emitter.good()) {
+      *error = "Failed to emit YAML for " + path;
+      return false;
+    }
+
+    std::ofstream output(path, std::ios::out | std::ios::trunc);
+    if (!output.is_open()) {
+      *error = "Failed to open " + path + " for writing";
+      return false;
+    }
+
+    output << emitter.c_str() << "\n";
+    if (!output.good()) {
+      *error = "Failed to write " + path;
+      return false;
+    }
+  } catch (const std::exception& e) {
+    *error = std::string("Failed to save start joints: ") + e.what();
+    return false;
+  }
+
   return true;
 }
 
