@@ -5,7 +5,7 @@ teleop:
   allow_motion: true
   dry_run: false
   control_mode: position
-  scale_factor: 0.5
+  scale_factor: 0.8
   control_trigger_threshold: 0.9
   control_trigger_release_threshold: 0.8
   xr_pose_lowpass_alpha: 0.8
