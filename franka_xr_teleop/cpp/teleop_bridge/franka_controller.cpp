@@ -31,7 +31,14 @@
 namespace teleop {
 namespace {
 
-constexpr double kDefaultHomeDurationS = 6.0;
+constexpr double kStartupHomeSpeedRadPerS = 0.12;
+constexpr double kStartupHomeAccelerationRadPerS2 = 0.6;
+constexpr double kStartupHomeJerkRadPerS3 = 4.0;
+constexpr double kStartupHomeServoKp = 6.0;
+constexpr double kStartupHomeServoKd = 1.5;
+constexpr double kStartupHomeArrivalToleranceRad = 5e-3;
+constexpr double kStartupHomeVelocityToleranceRadPerS = 2e-2;
+constexpr uint32_t kStartupHomeSettledCycles = 100;
 
 void ConfigureConservativeBehavior(franka::Robot* robot) {
   robot->setCollisionBehavior(
@@ -76,36 +83,80 @@ bool MoveToHomePose(franka::Robot* robot,
                     const std::array<double, 7>& q_goal,
                     std::atomic<bool>* stop_requested) {
   const franka::RobotState state0 = robot->readOnce();
-  const std::array<double, 7> q_start = state0.q;
-
+  const std::array<double, 7> q_start = state0.q_d;
   double max_error = 0.0;
   for (size_t i = 0; i < 7; ++i) {
     max_error = std::max(max_error, std::abs(q_goal[i] - q_start[i]));
   }
-  if (max_error < 1e-3) {
+  if (max_error < kStartupHomeArrivalToleranceRad) {
     return true;
   }
 
-  const double duration_s = std::max(kDefaultHomeDurationS, max_error / 0.2);
-  double elapsed_s = 0.0;
+  std::array<double, 7> q_ref = q_start;
+  std::array<double, 7> dq_ref{};
+  std::array<double, 7> ddq_ref{};
 
+  uint32_t settled_cycles = 0;
   robot->control(
-      [&](const franka::RobotState&, franka::Duration period) -> franka::JointPositions {
-        elapsed_s += period.toSec();
-        const double tau = std::clamp(elapsed_s / duration_s, 0.0, 1.0);
-        const double s = tau * tau * tau * (10.0 + tau * (-15.0 + 6.0 * tau));
+      [&](const franka::RobotState& state, franka::Duration period) -> franka::JointPositions {
+        const double dt = std::max(period.toSec(), 1e-6);
+        const double max_delta_acceleration = kStartupHomeJerkRadPerS3 * dt;
+        bool internal_finished = true;
 
-        std::array<double, 7> q_cmd{};
         for (size_t i = 0; i < 7; ++i) {
-          q_cmd[i] = q_start[i] + s * (q_goal[i] - q_start[i]);
+          const double error = q_goal[i] - q_ref[i];
+          const double desired_acceleration =
+              std::clamp(kStartupHomeServoKp * error - kStartupHomeServoKd * dq_ref[i],
+                         -kStartupHomeAccelerationRadPerS2,
+                         kStartupHomeAccelerationRadPerS2);
+          ddq_ref[i] += std::clamp(desired_acceleration - ddq_ref[i],
+                                   -max_delta_acceleration,
+                                   max_delta_acceleration);
+          ddq_ref[i] = std::clamp(ddq_ref[i],
+                                  -kStartupHomeAccelerationRadPerS2,
+                                  kStartupHomeAccelerationRadPerS2);
+          dq_ref[i] += ddq_ref[i] * dt;
+          dq_ref[i] = std::clamp(dq_ref[i], -kStartupHomeSpeedRadPerS, kStartupHomeSpeedRadPerS);
+          q_ref[i] += dq_ref[i] * dt;
+
+          const double new_error = q_goal[i] - q_ref[i];
+          if ((error > 0.0 && new_error < 0.0) || (error < 0.0 && new_error > 0.0)) {
+            q_ref[i] = q_goal[i];
+            dq_ref[i] = 0.0;
+            ddq_ref[i] = 0.0;
+          }
+
+          if (std::abs(q_goal[i] - q_ref[i]) > kStartupHomeArrivalToleranceRad ||
+              std::abs(dq_ref[i]) > kStartupHomeVelocityToleranceRadPerS) {
+            internal_finished = false;
+          }
         }
 
-        franka::JointPositions out(q_cmd);
-        if (tau >= 1.0 || stop_requested->load(std::memory_order_acquire)) {
+        franka::JointPositions out(q_ref);
+        bool robot_settled = internal_finished;
+        for (size_t i = 0; i < 7 && robot_settled; ++i) {
+          robot_settled = robot_settled &&
+                          std::abs(q_goal[i] - state.q_d[i]) <= kStartupHomeArrivalToleranceRad &&
+                          std::abs(q_goal[i] - state.q[i]) <= 2.0 * kStartupHomeArrivalToleranceRad &&
+                          std::abs(state.dq_d[i]) <= kStartupHomeVelocityToleranceRadPerS &&
+                          std::abs(state.dq[i]) <= 2.0 * kStartupHomeVelocityToleranceRadPerS;
+        }
+
+        if (robot_settled) {
+          ++settled_cycles;
+        } else {
+          settled_cycles = 0;
+        }
+
+        if (settled_cycles >= kStartupHomeSettledCycles ||
+            stop_requested->load(std::memory_order_acquire)) {
           return franka::MotionFinished(out);
         }
         return out;
-      });
+      },
+      franka::ControllerMode::kJointImpedance,
+      true,
+      100.0);
   return !stop_requested->load(std::memory_order_acquire);
 }
 
