@@ -199,6 +199,9 @@ void TraceRecorder::WriteRtHeader() {
     rt_file_ << ",q_planned_" << i;
   }
   for (size_t i = 0; i < 7; ++i) {
+    rt_file_ << ",q_traj_ref_" << i;
+  }
+  for (size_t i = 0; i < 7; ++i) {
     rt_file_ << ",q_cmd_" << i;
   }
   for (size_t i = 0; i < 7; ++i) {
@@ -259,6 +262,7 @@ void TraceRecorder::WriteRtRow(const RtTraceSample& sample) {
   WriteDoubleArray(&rt_file_, sample.dq);
   WriteDoubleArray(&rt_file_, sample.q_d);
   WriteDoubleArray(&rt_file_, sample.q_planned);
+  WriteDoubleArray(&rt_file_, sample.q_traj_ref);
   WriteDoubleArray(&rt_file_, sample.q_cmd);
   WriteDoubleArray(&rt_file_, sample.target_delta);
   WriteDoubleArray(&rt_file_, sample.filtered_delta);
@@ -269,4 +273,3 @@ void TraceRecorder::WriteRtRow(const RtTraceSample& sample) {
 }
 
 }  // namespace teleop
-

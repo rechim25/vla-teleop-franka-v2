@@ -135,7 +135,6 @@ bool LoadTeleopConfig(const std::string& path, AppConfig* config, std::string* e
     ReadScalar(ik, "max_joint_velocity_radps", &config->bridge.ik.max_joint_velocity_radps);
     ReadScalar(ik, "max_joint_acceleration_radps2", &config->bridge.ik.max_joint_acceleration_radps2);
     ReadScalar(ik, "max_joint_step_rad", &config->bridge.ik.max_joint_step_rad);
-    ReadScalar(ik, "target_smoothing_alpha", &config->bridge.ik.target_smoothing_alpha);
     ReadScalar(ik,
                "realtime_target_smoothing_alpha",
                &config->bridge.ik.realtime_target_smoothing_alpha);
@@ -278,11 +277,6 @@ bool LoadAppConfig(const std::string& config_dir, AppConfig* config, std::string
   }
   if (config->bridge.ik.max_joint_acceleration_radps2 <= 0.0) {
     *error = "teleop.ik.max_joint_acceleration_radps2 must be > 0";
-    return false;
-  }
-  if (config->bridge.ik.target_smoothing_alpha < 0.0 ||
-      config->bridge.ik.target_smoothing_alpha > 1.0) {
-    *error = "teleop.ik.target_smoothing_alpha must be in [0, 1]";
     return false;
   }
   if (config->bridge.ik.realtime_target_smoothing_alpha < 0.0 ||

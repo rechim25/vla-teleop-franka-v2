@@ -31,6 +31,12 @@ def get_col(data, name):
     return np.asarray(data[name], dtype=np.float64)
 
 
+def get_col_or_default(data, name, default):
+    if name in data.dtype.names:
+        return np.asarray(data[name], dtype=np.float64)
+    return np.asarray(default, dtype=np.float64)
+
+
 def add_legend(ax, ncol=1):
     handles, labels = ax.get_legend_handles_labels()
     if handles:
@@ -97,11 +103,12 @@ def make_joint_grid_figure(trace_dir, rt, tr):
         q = get_col(rt, f"q_{joint}")
         q_d = get_col(rt, f"q_d_{joint}")
         q_planned = get_col(rt, f"q_planned_{joint}")
+        q_traj_ref = get_col_or_default(rt, f"q_traj_ref_{joint}", q_planned)
         q_cmd = get_col(rt, f"q_cmd_{joint}")
         target_delta = get_col(rt, f"target_delta_{joint}")
         filtered_delta = get_col(rt, f"filtered_delta_{joint}")
         command_delta = get_col(rt, f"command_delta_{joint}")
-        q_planned_minus_q = q_planned - q
+        q_traj_ref_minus_q = q_traj_ref - q
         q_cmd_minus_q = q_cmd - q
 
         ax_pos = axes[joint, 0]
@@ -110,11 +117,12 @@ def make_joint_grid_figure(trace_dir, rt, tr):
         ax_pos.plot(tr, q, label="q_measured", linewidth=1.2)
         ax_pos.plot(tr, q_d, label="q_d", linewidth=1.0)
         ax_pos.plot(tr, q_planned, label="q_planned", linewidth=1.0)
+        ax_pos.plot(tr, q_traj_ref, label="q_traj_ref", linewidth=1.0)
         ax_pos.plot(tr, q_cmd, label="q_cmd", linewidth=1.0)
         style_axis(ax_pos, f"J{joint} Pos [rad]")
-        add_legend(ax_pos, ncol=4)
+        add_legend(ax_pos, ncol=5)
 
-        ax_err.plot(tr, q_planned_minus_q, label="q_planned - q", linewidth=1.2)
+        ax_err.plot(tr, q_traj_ref_minus_q, label="q_traj_ref - q", linewidth=1.2)
         ax_err.plot(tr, q_cmd_minus_q, label="q_cmd - q", linewidth=1.0)
         ax_err.plot(tr, target_delta, label="target_delta", linewidth=1.0)
         ax_err.plot(tr, filtered_delta, label="filtered_delta", linewidth=1.0)
@@ -135,6 +143,7 @@ def make_single_joint_figure(trace_dir, rt, tr, joint):
     q = get_col(rt, f"q_{joint}")
     q_d = get_col(rt, f"q_d_{joint}")
     q_planned = get_col(rt, f"q_planned_{joint}")
+    q_traj_ref = get_col_or_default(rt, f"q_traj_ref_{joint}", q_planned)
     q_cmd = get_col(rt, f"q_cmd_{joint}")
     target_delta = get_col(rt, f"target_delta_{joint}")
     filtered_delta = get_col(rt, f"filtered_delta_{joint}")
@@ -146,13 +155,14 @@ def make_single_joint_figure(trace_dir, rt, tr, joint):
     axes[0].plot(tr, q, label="q_measured")
     axes[0].plot(tr, q_d, label="q_d")
     axes[0].plot(tr, q_planned, label="q_planned")
+    axes[0].plot(tr, q_traj_ref, label="q_traj_ref")
     axes[0].plot(tr, q_cmd, label="q_cmd")
     style_axis(axes[0], f"J{joint} Pos [rad]")
-    add_legend(axes[0], ncol=4)
+    add_legend(axes[0], ncol=5)
 
-    axes[1].plot(tr, q_planned - q, label="q_planned - q")
+    axes[1].plot(tr, q_traj_ref - q, label="q_traj_ref - q")
     axes[1].plot(tr, q_cmd - q, label="q_cmd - q")
-    axes[1].plot(tr, q_planned - q_d, label="q_planned - q_d")
+    axes[1].plot(tr, q_planned - q_traj_ref, label="q_planned - q_traj_ref")
     style_axis(axes[1], f"J{joint} Error [rad]")
     add_legend(axes[1], ncol=3)
 

@@ -222,64 +222,90 @@ bool SolveIkStep(const franka::Model& model,
   return true;
 }
 
-class JointTargetSmoother {
+class RtJointTrajectoryInterpolator {
  public:
-  explicit JointTargetSmoother(const TeleopBridgeConfig& config)
-      : dt_(1.0 / std::max(config.teleop.planner_rate_hz, 1.0)),
-        max_velocity_(std::max(config.ik.max_joint_velocity_radps, 1e-6)),
-        max_acceleration_(std::max(config.ik.max_joint_acceleration_radps2, 1e-6)),
-        max_step_(std::max(0.0, config.ik.max_joint_step_rad)),
-        alpha_(std::clamp(config.ik.target_smoothing_alpha, 0.0, 1.0)) {}
+  explicit RtJointTrajectoryInterpolator(const TeleopBridgeConfig& config)
+      : default_segment_duration_ns_(static_cast<uint64_t>(
+            1e9 / std::max(config.teleop.planner_rate_hz, 1.0))),
+        min_segment_duration_ns_(std::max<uint64_t>(1, default_segment_duration_ns_ / 2)),
+        max_segment_duration_ns_(
+            std::max<uint64_t>(min_segment_duration_ns_, default_segment_duration_ns_ * 2)) {}
 
-  void Reset() {
-    initialized_ = false;
-    prev_q_.fill(0.0);
-    prev_dq_.fill(0.0);
+  void Reset(const std::array<double, 7>& reference_q, uint64_t now_ns) {
+    initialized_ = true;
+    last_target_timestamp_ns_ = 0;
+    segment_start_ns_ = now_ns;
+    segment_duration_ns_ = default_segment_duration_ns_;
+    q_start_ = reference_q;
+    q_goal_ = reference_q;
+    q_ref_ = reference_q;
   }
 
-  std::array<double, 7> Update(const std::array<double, 7>& raw_target_q,
-                               const std::array<double, 7>& reference_q) {
+  void UpdateGoal(const std::array<double, 7>& target_q,
+                  uint64_t target_timestamp_ns,
+                  uint64_t now_ns) {
     if (!initialized_) {
-      prev_q_ = reference_q;
-      prev_dq_.fill(0.0);
-      initialized_ = true;
+      Reset(target_q, now_ns);
+      last_target_timestamp_ns_ = target_timestamp_ns;
+      return;
+    }
+    if (target_timestamp_ns == 0 || target_timestamp_ns == last_target_timestamp_ns_) {
+      return;
     }
 
-    std::array<double, 7> q_out = prev_q_;
-    std::array<double, 7> dq_out = prev_dq_;
+    const std::array<double, 7> current_q = Sample(now_ns);
 
-    const double max_step_from_velocity = max_velocity_ * dt_;
-    const double max_step = max_step_ > 0.0 ? std::min(max_step_, max_step_from_velocity)
-                                            : max_step_from_velocity;
-    const double max_delta_velocity = max_acceleration_ * dt_;
+    uint64_t segment_duration_ns = default_segment_duration_ns_;
+    if (last_target_timestamp_ns_ != 0 && target_timestamp_ns > last_target_timestamp_ns_) {
+      segment_duration_ns = target_timestamp_ns - last_target_timestamp_ns_;
+    }
+    segment_duration_ns = std::clamp(
+        segment_duration_ns, min_segment_duration_ns_, max_segment_duration_ns_);
 
+    q_start_ = current_q;
+    q_goal_ = target_q;
+    q_ref_ = current_q;
+    segment_start_ns_ = now_ns;
+    segment_duration_ns_ = segment_duration_ns;
+    last_target_timestamp_ns_ = target_timestamp_ns;
+  }
+
+  std::array<double, 7> Sample(uint64_t now_ns) {
+    if (!initialized_) {
+      return q_ref_;
+    }
+
+    double tau = 1.0;
+    if (now_ns <= segment_start_ns_) {
+      tau = 0.0;
+    } else if (segment_duration_ns_ > 0) {
+      const uint64_t elapsed_ns =
+          std::min(now_ns - segment_start_ns_, segment_duration_ns_);
+      tau = static_cast<double>(elapsed_ns) / static_cast<double>(segment_duration_ns_);
+    }
+
+    const double s = MinimumJerkBlend(std::clamp(tau, 0.0, 1.0));
     for (size_t i = 0; i < 7; ++i) {
-      const double raw_vel = (raw_target_q[i] - prev_q_[i]) / dt_;
-      const double blended_vel = alpha_ * raw_vel + (1.0 - alpha_) * prev_dq_[i];
-      const double velocity_limited = std::clamp(blended_vel, -max_velocity_, max_velocity_);
-      const double accel_limited = prev_dq_[i] +
-                                   std::clamp(velocity_limited - prev_dq_[i],
-                                              -max_delta_velocity,
-                                              max_delta_velocity);
-      const double step = std::clamp(accel_limited * dt_, -max_step, max_step);
-      q_out[i] = prev_q_[i] + step;
-      dq_out[i] = step / dt_;
+      q_ref_[i] = q_start_[i] + s * (q_goal_[i] - q_start_[i]);
     }
-
-    prev_q_ = q_out;
-    prev_dq_ = dq_out;
-    return q_out;
+    return q_ref_;
   }
 
  private:
-  double dt_ = 0.01;
-  double max_velocity_ = 0.35;
-  double max_acceleration_ = 1.5;
-  double max_step_ = 0.008;
-  double alpha_ = 0.25;
+  static double MinimumJerkBlend(double tau) {
+    return tau * tau * tau * (10.0 + tau * (-15.0 + 6.0 * tau));
+  }
+
   bool initialized_ = false;
-  std::array<double, 7> prev_q_{};
-  std::array<double, 7> prev_dq_{};
+  uint64_t last_target_timestamp_ns_ = 0;
+  uint64_t segment_start_ns_ = 0;
+  uint64_t segment_duration_ns_ = 1;
+  uint64_t default_segment_duration_ns_ = 1;
+  uint64_t min_segment_duration_ns_ = 1;
+  uint64_t max_segment_duration_ns_ = 1;
+  std::array<double, 7> q_start_{};
+  std::array<double, 7> q_goal_{};
+  std::array<double, 7> q_ref_{};
 };
 
 void PlannerLoop(const TeleopBridgeConfig& config,
@@ -635,6 +661,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
     uint64_t rt_last_ns = 0;
     uint64_t rt_trace_counter = 0;
     uint64_t last_success_rate_log_ns = 0;
+    RtJointTrajectoryInterpolator rt_interpolator(config_);
     std::array<double, 7> prev_command_velocity{};
     bool prev_command_velocity_initialized = false;
     const uint32_t rt_trace_decimation = std::max<uint32_t>(1, options_.trace.rt_decimation);
@@ -670,11 +697,18 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       const double rt_alpha = std::clamp(config_.ik.realtime_target_smoothing_alpha, 0.0, 1.0);
       const double joint_deadzone = std::max(0.0, config_.ik.realtime_joint_deadzone_rad);
       if (!apply_motion) {
+        rt_interpolator.Reset(state.q_d, now_ns);
         prev_command_velocity.fill(0.0);
         prev_command_velocity_initialized = false;
       } else if (!prev_command_velocity_initialized) {
+        rt_interpolator.Reset(state.q_d, now_ns);
         prev_command_velocity.fill(0.0);
         prev_command_velocity_initialized = true;
+      }
+      std::array<double, 7> q_traj_ref = state.q_d;
+      if (apply_motion) {
+        rt_interpolator.UpdateGoal(planned.target_q, planned.target_timestamp_ns, now_ns);
+        q_traj_ref = rt_interpolator.Sample(now_ns);
       }
       std::array<double, 7> q_cmd = state.q_d;
       std::array<double, 7> target_delta{};
@@ -685,7 +719,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       double max_abs_filtered_delta = 0.0;
       double max_abs_command_delta = 0.0;
       for (size_t i = 0; i < 7; ++i) {
-        target_delta[i] = planned.target_q[i] - state.q_d[i];
+        target_delta[i] = q_traj_ref[i] - state.q_d[i];
         if (std::abs(target_delta[i]) < joint_deadzone) {
           target_delta[i] = 0.0;
         }
@@ -749,6 +783,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
         trace.dq = state.dq;
         trace.q_d = state.q_d;
         trace.q_planned = planned.target_q;
+        trace.q_traj_ref = q_traj_ref;
         trace.q_cmd = q_cmd;
         trace.target_delta = target_delta;
         trace.filtered_delta = filtered_delta;

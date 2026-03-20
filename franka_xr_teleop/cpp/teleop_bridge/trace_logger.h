@@ -65,6 +65,7 @@ struct RtTraceSample {
   std::array<double, 7> dq{};
   std::array<double, 7> q_d{};
   std::array<double, 7> q_planned{};
+  std::array<double, 7> q_traj_ref{};
   std::array<double, 7> q_cmd{};
   std::array<double, 7> target_delta{};
   std::array<double, 7> filtered_delta{};
@@ -150,4 +151,3 @@ class TraceRecorder {
 };
 
 }  // namespace teleop
-
