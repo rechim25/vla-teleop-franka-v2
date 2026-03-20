@@ -8,31 +8,31 @@ teleop:
   scale_factor: 0.5
   control_trigger_threshold: 0.9
   control_trigger_release_threshold: 0.8
-  xr_pose_lowpass_alpha: 0.45
-  xr_translation_deadband_m: 0.0025
+  xr_pose_lowpass_alpha: 0.8
+  xr_translation_deadband_m: 0.0005
   xr_rotation_deadband_rad: 0.03
   xr_hold_translation_threshold_m: 0.00075
   xr_hold_rotation_threshold_rad: 0.010
   xr_hold_release_multiplier: 2.5
   xr_hold_dwell_s: 0.12
-  planner_rate_hz: 60.0
+  planner_rate_hz: 100.0
   start_joint_positions_rad: [0.0, -0.78539816, 0.0, -2.35619449, 0.0, 1.57079633, 0.78539816]
   ik:
     damping: 0.08
     nullspace_gain: 0.0
-    max_joint_velocity_radps: 0.26
-    max_joint_acceleration_radps2: 1.8
-    max_joint_jerk_radps3: 12.0
-    max_joint_step_rad: 0.0048
+    max_joint_velocity_radps: 1.5
+    max_joint_acceleration_radps2: 6.0
+    max_joint_jerk_radps3: 80.0
+    max_joint_step_rad: 0.025
     realtime_joint_deadzone_rad: 0.001
-    realtime_servo_kp: 60.0
+    realtime_servo_kp: 160.0
     realtime_servo_kd: 10.0
     realtime_hold_position_threshold_rad: 0.0008
     realtime_hold_velocity_threshold_radps: 0.01
     realtime_hold_release_threshold_rad: 0.0016
-    position_gain: 2.1
+    position_gain: 4.0
     orientation_gain: 0.30
-    task_translation_deadband_m: 0.0018
+    task_translation_deadband_m: 0.0003
     task_rotation_deadband_rad: 0.04
     manipulability_threshold: 0.05
     singularity_damping_gain: 1.0
