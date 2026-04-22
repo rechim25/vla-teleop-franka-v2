@@ -42,6 +42,32 @@ constexpr double kStartupHomeArrivalToleranceRad = 5e-3;
 constexpr double kStartupHomeVelocityToleranceRadPerS = 2e-2;
 constexpr uint32_t kStartupHomeSettledCycles = 100;
 constexpr uint64_t kPlannerTargetGraceNs = 35000000ull;  // 35 ms
+constexpr std::array<double, 7> kPandaJointLowerLimitsRad{
+    {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973}};
+constexpr std::array<double, 7> kPandaJointUpperLimitsRad{
+    {2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973}};
+constexpr double kJointLimitMarginRad = 0.02;
+constexpr uint32_t kCartesianContactDebounceCycles = 15;  // ~15 ms at 1 kHz
+
+template <size_t N>
+bool AnyPositive(const std::array<double, N>& values) {
+  for (double value : values) {
+    if (value > 0.0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::array<double, 7> ClampToJointLimits(const std::array<double, 7>& q) {
+  std::array<double, 7> out = q;
+  for (size_t i = 0; i < 7; ++i) {
+    const double lo = kPandaJointLowerLimitsRad[i] + kJointLimitMarginRad;
+    const double hi = kPandaJointUpperLimitsRad[i] - kJointLimitMarginRad;
+    out[i] = std::clamp(out[i], lo, hi);
+  }
+  return out;
+}
 
 void ConfigureConservativeBehavior(franka::Robot* robot) {
   robot->setCollisionBehavior(
@@ -286,7 +312,7 @@ bool SolveIkStep(const franka::Model& model,
     q_next[i] += step;
   }
 
-  *target_q = q_next;
+  *target_q = ClampToJointLimits(q_next);
   return true;
 }
 
@@ -381,6 +407,14 @@ class JointPositionTrajectoryGenerator {
         const double step_unclamped = dq_out[i] * dt;
         const double step = std::clamp(step_unclamped, -max_step, max_step);
         q_out[i] = q_ref_[i] + step;
+        const double joint_lo = kPandaJointLowerLimitsRad[i] + kJointLimitMarginRad;
+        const double joint_hi = kPandaJointUpperLimitsRad[i] - kJointLimitMarginRad;
+        const double clamped_q_out = std::clamp(q_out[i], joint_lo, joint_hi);
+        if (std::abs(clamped_q_out - q_out[i]) > 1e-12) {
+          q_out[i] = clamped_q_out;
+          dq_out[i] = 0.0;
+          ddq_out[i] = 0.0;
+        }
         (*command_delta)[i] = q_out[i] - reference_q[i];
         if (std::abs(velocity_unclamped - dq_out[i]) > 1e-12 || std::abs(step_unclamped - step) > 1e-12) {
           (*clamp_saturated)[i] = 1;
@@ -458,6 +492,14 @@ class JointPositionTrajectoryGenerator {
       const double step_unclamped = dq_out[i] * dt;
       const double step = std::clamp(step_unclamped, -max_step, max_step);
       q_out[i] = q_ref_[i] + step;
+      const double joint_lo = kPandaJointLowerLimitsRad[i] + kJointLimitMarginRad;
+      const double joint_hi = kPandaJointUpperLimitsRad[i] - kJointLimitMarginRad;
+      const double clamped_q_out = std::clamp(q_out[i], joint_lo, joint_hi);
+      if (std::abs(clamped_q_out - q_out[i]) > 1e-12) {
+        q_out[i] = clamped_q_out;
+        dq_out[i] = 0.0;
+        ddq_out[i] = 0.0;
+      }
 
       if (error != 0.0) {
         const double new_error = active_target_q[i] - q_out[i];
@@ -548,8 +590,18 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       planned.target_q = robot.q;
       planned.desired_tcp_pose = robot.tcp_pose;
       planned.control_mode = ControlMode::kHold;
+      const double gripper_trigger = Clamp01(xr_cmd.gripper_trigger_value);
+      const double gripper_rearm_threshold =
+          std::clamp(config.gripper.close_threshold - 0.01,
+                     config.gripper.open_threshold,
+                     config.gripper.close_threshold);
+      if (gripper_trigger <= gripper_rearm_threshold) {
+        // Re-align toggle baseline with measured gripper state while trigger is released.
+        // This prevents stale planner-side state after object contact (HOLD).
+        gripper_controller.SyncCurrentState(active_gripper_state->load(std::memory_order_acquire));
+      }
       const GripperState desired_state =
-          gripper_controller.UpdateDesiredState(config.gripper, xr_cmd.gripper_trigger_value, now_ns);
+          gripper_controller.UpdateDesiredState(config.gripper, gripper_trigger, now_ns);
       const double gripper_command = desired_state == GripperState::kClose ? 1.0 : 0.0;
       planned.target_gripper_width_m = MapStateToWidth(config.gripper, desired_state);
       planned.requested_action.gripper_command = gripper_command;
@@ -1087,115 +1139,157 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
     uint64_t rt_last_ns = 0;
     uint64_t rt_trace_counter = 0;
     uint64_t last_success_rate_log_ns = 0;
+    uint64_t motion_inhibit_until_ns = 0;
+    uint32_t cartesian_contact_cycles = 0;
     JointPositionTrajectoryGenerator trajectory_generator(config_);
     const uint32_t rt_trace_decimation = std::max<uint32_t>(1, options_.trace.rt_decimation);
-    robot.control([&](const franka::RobotState& state, franka::Duration period) -> franka::JointPositions {
-      const uint64_t now_ns = MonotonicNowNs();
-      const uint64_t rt_loop_dt_ns = (rt_last_ns == 0) ? 0 : (now_ns - rt_last_ns);
-      rt_last_ns = now_ns;
-      if (last_success_rate_log_ns == 0 || (now_ns - last_success_rate_log_ns) >= 5000000000ull) {
-        last_success_rate_log_ns = now_ns;
-        std::cerr << "libfranka control_command_success_rate=" << state.control_command_success_rate
-                  << " q_err_max=" << [&state]() {
-                       double max_err = 0.0;
-                       for (size_t i = 0; i < 7; ++i) {
-                         max_err = std::max(max_err, std::abs(state.q[i] - state.q_d[i]));
-                       }
-                       return max_err;
-                     }()
-                  << "\n";
+    while (!stop_requested->load(std::memory_order_acquire)) {
+      try {
+        robot.control([&](const franka::RobotState& state,
+                          franka::Duration period) -> franka::JointPositions {
+          const uint64_t now_ns = MonotonicNowNs();
+          const uint64_t rt_loop_dt_ns = (rt_last_ns == 0) ? 0 : (now_ns - rt_last_ns);
+          rt_last_ns = now_ns;
+          if (last_success_rate_log_ns == 0 || (now_ns - last_success_rate_log_ns) >= 5000000000ull) {
+            last_success_rate_log_ns = now_ns;
+            std::cerr << "libfranka control_command_success_rate=" << state.control_command_success_rate
+                      << " q_err_max=" << [&state]() {
+                           double max_err = 0.0;
+                           for (size_t i = 0; i < 7; ++i) {
+                             max_err = std::max(max_err, std::abs(state.q[i] - state.q_d[i]));
+                           }
+                           return max_err;
+                         }()
+                      << "\n";
+          }
+          const RobotSnapshot robot_snapshot = ToSnapshot(state);
+          robot_state_buffer.Publish(robot_snapshot);
+
+          const bool collision_active =
+              AnyPositive(state.joint_collision) || AnyPositive(state.cartesian_collision);
+          const bool cartesian_contact_active = AnyPositive(state.cartesian_contact);
+          if (cartesian_contact_active) {
+            cartesian_contact_cycles =
+                std::min<uint32_t>(cartesian_contact_cycles + 1, kCartesianContactDebounceCycles);
+          } else {
+            cartesian_contact_cycles = 0;
+          }
+          const bool sustained_cartesian_contact =
+              cartesian_contact_cycles >= kCartesianContactDebounceCycles;
+
+          const PlannedTarget planned = planned_target_buffer.ReadLatest();
+          const bool recovery_inhibit_active = now_ns < motion_inhibit_until_ns;
+          const bool apply_motion = config_.allow_motion && planned.teleop_active && planned.target_fresh &&
+                                    planned.control_mode != ControlMode::kHold &&
+                                    !collision_active &&
+                                    !sustained_cartesian_contact &&
+                                    !recovery_inhibit_active;
+
+          const double dt = std::max(period.toSec(), 1e-6);
+          const double max_step = std::min(config_.ik.max_joint_step_rad,
+                                           config_.ik.max_joint_velocity_radps * dt);
+          const double rt_alpha = 0.0;
+          std::array<double, 7> target_delta{};
+          std::array<double, 7> filtered_delta{};
+          std::array<double, 7> command_delta{};
+          std::array<uint8_t, 7> clamp_saturated{};
+          const std::array<double, 7> q_cmd = trajectory_generator.Update(planned.target_q,
+                                                                          state.q_d,
+                                                                          dt,
+                                                                          apply_motion,
+                                                                          &target_delta,
+                                                                          &filtered_delta,
+                                                                          &command_delta,
+                                                                          &clamp_saturated);
+          double max_abs_target_delta = 0.0;
+          double max_abs_filtered_delta = 0.0;
+          double max_abs_command_delta = 0.0;
+          for (size_t i = 0; i < 7; ++i) {
+            max_abs_target_delta = std::max(max_abs_target_delta, std::abs(target_delta[i]));
+            max_abs_filtered_delta = std::max(max_abs_filtered_delta, std::abs(filtered_delta[i]));
+            max_abs_command_delta = std::max(max_abs_command_delta, std::abs(command_delta[i]));
+          }
+
+          RobotObservation obs{};
+          obs.timestamp_ns = now_ns;
+          obs.q = state.q;
+          obs.dq = state.dq;
+          obs.tcp_pose = MatrixToPose(state.O_T_EE);
+          obs.gripper_width = measured_gripper_width_m.load(std::memory_order_acquire);
+          obs.gripper_state = active_gripper_state.load(std::memory_order_acquire);
+          obs.executed_action = planned.requested_action;
+          obs.control_mode = planned.teleop_active ? planned.control_mode : ControlMode::kHold;
+          obs.teleop_state = planned.teleop_state;
+          obs.packet_age_ns = planned.packet_age_ns;
+          obs.target_age_ns =
+              now_ns > planned.target_timestamp_ns ? (now_ns - planned.target_timestamp_ns) : 0;
+          obs.target_fresh = planned.target_fresh;
+          obs.teleop_active = planned.teleop_active;
+          obs.target_manipulability = planned.manipulability;
+          obs.faults = planned.faults;
+          obs.faults.robot_not_ready = obs.faults.robot_not_ready || !robot_snapshot.robot_ok;
+          obs.faults.gripper_fault = obs.faults.gripper_fault || obs.gripper_state == GripperState::kFault;
+          obs.faults.control_exception =
+              obs.faults.control_exception || collision_active || sustained_cartesian_contact ||
+              recovery_inhibit_active;
+          observation_buffer_->Publish(obs);
+
+          if (trace_recorder != nullptr && ((rt_trace_counter++ % rt_trace_decimation) == 0)) {
+            RtTraceSample trace{};
+            trace.timestamp_ns = now_ns;
+            trace.loop_dt_ns = rt_loop_dt_ns;
+            trace.callback_period_ns = static_cast<uint64_t>(dt * 1e9);
+            trace.target_age_ns = obs.target_age_ns;
+            trace.teleop_state = static_cast<int>(obs.teleop_state);
+            trace.control_mode = static_cast<int>(obs.control_mode);
+            trace.teleop_active = obs.teleop_active;
+            trace.target_fresh = obs.target_fresh;
+            trace.apply_motion = apply_motion;
+            trace.faults = obs.faults;
+            trace.max_step = max_step;
+            trace.rt_alpha = rt_alpha;
+            trace.q = state.q;
+            trace.dq = state.dq;
+            trace.q_d = state.q_d;
+            trace.q_planned = planned.target_q;
+            trace.q_cmd = q_cmd;
+            trace.target_delta = target_delta;
+            trace.filtered_delta = filtered_delta;
+            trace.command_delta = command_delta;
+            trace.clamp_saturated = clamp_saturated;
+            trace.max_abs_target_delta = max_abs_target_delta;
+            trace.max_abs_filtered_delta = max_abs_filtered_delta;
+            trace.max_abs_command_delta = max_abs_command_delta;
+            trace_recorder->PushRt(trace);
+          }
+
+          franka::JointPositions out(q_cmd);
+          if (stop_requested->load(std::memory_order_acquire)) {
+            return franka::MotionFinished(out);
+          }
+          return out;
+        },
+                      franka::ControllerMode::kJointImpedance,
+                      config_.limit_rate,
+                      config_.lpf_cutoff_frequency);
+        break;
+      } catch (const franka::ControlException& e) {
+        const std::string what = e.what();
+        std::cerr << "Franka control exception: " << what << "\n";
+        if (what.find("reflex") == std::string::npos) {
+          throw;
+        }
+        try {
+          robot.automaticErrorRecovery();
+          trajectory_generator.Reset();
+          motion_inhibit_until_ns = MonotonicNowNs() + 400000000ull;  // 400 ms settle window
+          std::cerr << "Recovered from reflex; continuing teleop after brief hold.\n";
+        } catch (const std::exception& recovery_error) {
+          std::cerr << "Automatic error recovery failed: " << recovery_error.what() << "\n";
+          throw;
+        }
       }
-      const RobotSnapshot robot_snapshot = ToSnapshot(state);
-      robot_state_buffer.Publish(robot_snapshot);
-
-      const PlannedTarget planned = planned_target_buffer.ReadLatest();
-      const bool apply_motion = config_.allow_motion && planned.teleop_active && planned.target_fresh &&
-                                planned.control_mode != ControlMode::kHold;
-
-      const double dt = std::max(period.toSec(), 1e-6);
-      const double max_step = std::min(config_.ik.max_joint_step_rad,
-                                       config_.ik.max_joint_velocity_radps * dt);
-      const double rt_alpha = 0.0;
-      std::array<double, 7> target_delta{};
-      std::array<double, 7> filtered_delta{};
-      std::array<double, 7> command_delta{};
-      std::array<uint8_t, 7> clamp_saturated{};
-      const std::array<double, 7> q_cmd = trajectory_generator.Update(planned.target_q,
-                                                                      state.q_d,
-                                                                      dt,
-                                                                      apply_motion,
-                                                                      &target_delta,
-                                                                      &filtered_delta,
-                                                                      &command_delta,
-                                                                      &clamp_saturated);
-      double max_abs_target_delta = 0.0;
-      double max_abs_filtered_delta = 0.0;
-      double max_abs_command_delta = 0.0;
-      for (size_t i = 0; i < 7; ++i) {
-        max_abs_target_delta = std::max(max_abs_target_delta, std::abs(target_delta[i]));
-        max_abs_filtered_delta = std::max(max_abs_filtered_delta, std::abs(filtered_delta[i]));
-        max_abs_command_delta = std::max(max_abs_command_delta, std::abs(command_delta[i]));
-      }
-
-      RobotObservation obs{};
-      obs.timestamp_ns = now_ns;
-      obs.q = state.q;
-      obs.dq = state.dq;
-      obs.tcp_pose = MatrixToPose(state.O_T_EE);
-      obs.gripper_width = measured_gripper_width_m.load(std::memory_order_acquire);
-      obs.gripper_state = active_gripper_state.load(std::memory_order_acquire);
-      obs.executed_action = planned.requested_action;
-      obs.control_mode = planned.teleop_active ? planned.control_mode : ControlMode::kHold;
-      obs.teleop_state = planned.teleop_state;
-      obs.packet_age_ns = planned.packet_age_ns;
-      obs.target_age_ns =
-          now_ns > planned.target_timestamp_ns ? (now_ns - planned.target_timestamp_ns) : 0;
-      obs.target_fresh = planned.target_fresh;
-      obs.teleop_active = planned.teleop_active;
-      obs.target_manipulability = planned.manipulability;
-      obs.faults = planned.faults;
-      obs.faults.robot_not_ready = obs.faults.robot_not_ready || !robot_snapshot.robot_ok;
-      obs.faults.gripper_fault = obs.faults.gripper_fault || obs.gripper_state == GripperState::kFault;
-      observation_buffer_->Publish(obs);
-
-      if (trace_recorder != nullptr && ((rt_trace_counter++ % rt_trace_decimation) == 0)) {
-        RtTraceSample trace{};
-        trace.timestamp_ns = now_ns;
-        trace.loop_dt_ns = rt_loop_dt_ns;
-        trace.callback_period_ns = static_cast<uint64_t>(dt * 1e9);
-        trace.target_age_ns = obs.target_age_ns;
-        trace.teleop_state = static_cast<int>(obs.teleop_state);
-        trace.control_mode = static_cast<int>(obs.control_mode);
-        trace.teleop_active = obs.teleop_active;
-        trace.target_fresh = obs.target_fresh;
-        trace.apply_motion = apply_motion;
-        trace.faults = obs.faults;
-        trace.max_step = max_step;
-        trace.rt_alpha = rt_alpha;
-        trace.q = state.q;
-        trace.dq = state.dq;
-        trace.q_d = state.q_d;
-        trace.q_planned = planned.target_q;
-        trace.q_cmd = q_cmd;
-        trace.target_delta = target_delta;
-        trace.filtered_delta = filtered_delta;
-        trace.command_delta = command_delta;
-        trace.clamp_saturated = clamp_saturated;
-        trace.max_abs_target_delta = max_abs_target_delta;
-        trace.max_abs_filtered_delta = max_abs_filtered_delta;
-        trace.max_abs_command_delta = max_abs_command_delta;
-        trace_recorder->PushRt(trace);
-      }
-
-      franka::JointPositions out(q_cmd);
-      if (stop_requested->load(std::memory_order_acquire)) {
-        return franka::MotionFinished(out);
-      }
-      return out;
-    },
-                  franka::ControllerMode::kJointImpedance,
-                  config_.limit_rate,
-                  config_.lpf_cutoff_frequency);
+    }
 
     join_threads();
     stop_trace();
