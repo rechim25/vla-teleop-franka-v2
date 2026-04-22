@@ -511,6 +511,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
                  LatestPlannedTargetBuffer* planned_target_buffer,
                  TraceRecorder* trace_recorder,
                  uint32_t trace_decimation,
+                 const std::atomic<GripperState>* active_gripper_state,
                  std::atomic<GripperState>* desired_gripper_state,
                  std::atomic<bool>* stop_requested) {
   try {
@@ -519,7 +520,9 @@ void PlannerLoop(const TeleopBridgeConfig& config,
 
     SafetyFilter safety(config.safety, config.teleop.planner_rate_hz);
     GripperController gripper_controller;
-    gripper_controller.Reset(GripperState::kOpen);
+    const GripperState initial_gripper_state =
+        active_gripper_state->load(std::memory_order_acquire);
+    gripper_controller.Reset(initial_gripper_state);
     TeleopMapper mapper(config);
     TeleopStateMachine state_machine;
     bool deadman_latched = false;
@@ -1064,6 +1067,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
                                  &planned_target_buffer,
                                  trace_recorder.get(),
                                  std::max<uint32_t>(1, options_.trace.planner_decimation),
+                                 &active_gripper_state,
                                  &desired_gripper_state,
                                  stop_requested);
 

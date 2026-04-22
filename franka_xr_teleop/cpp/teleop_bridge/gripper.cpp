@@ -2,12 +2,29 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace teleop {
+
+namespace {
+
+bool IsClosedLike(GripperState state) {
+  return state == GripperState::kClose || state == GripperState::kHold;
+}
+
+}  // namespace
 
 void GripperController::Reset(GripperState initial) {
   current_ = initial;
   last_toggle_time_ns_ = 0;
+  trigger_pressed_ = false;
+}
+
+void GripperController::SyncCurrentState(GripperState measured_state) {
+  if (measured_state == GripperState::kFault) {
+    return;
+  }
+  current_ = IsClosedLike(measured_state) ? GripperState::kClose : GripperState::kOpen;
 }
 
 GripperState GripperController::UpdateDesiredState(const GripperConfig& config,
@@ -19,24 +36,26 @@ GripperState GripperController::UpdateDesiredState(const GripperConfig& config,
     return current_;
   }
 
-  GripperState resolved_state = current_;
-  if (desired_command >= config.close_threshold) {
-    resolved_state = GripperState::kClose;
-  } else if (desired_command <= config.open_threshold) {
-    resolved_state = GripperState::kOpen;
+  const double rearm_threshold = std::clamp(0.5 * (config.open_threshold + config.close_threshold),
+                                            0.0,
+                                            config.close_threshold);
+
+  if (desired_command <= rearm_threshold) {
+    trigger_pressed_ = false;
   }
 
-  const bool curr_closed = current_ == GripperState::kClose;
-  const bool desired_closed = resolved_state == GripperState::kClose;
-  if (curr_closed != desired_closed) {
-    const double elapsed_s = static_cast<double>(now_ns - last_toggle_time_ns_) * 1e-9;
-    if (last_toggle_time_ns_ != 0 && elapsed_s < config.toggle_debounce_s) {
-      return current_;
+  const bool pressed_now = desired_command >= config.close_threshold;
+  if (pressed_now && !trigger_pressed_) {
+    const double elapsed_s =
+        last_toggle_time_ns_ == 0 ? std::numeric_limits<double>::infinity()
+                                  : static_cast<double>(now_ns - last_toggle_time_ns_) * 1e-9;
+    if (elapsed_s >= config.toggle_debounce_s) {
+      current_ = IsClosedLike(current_) ? GripperState::kOpen : GripperState::kClose;
+      last_toggle_time_ns_ = now_ns;
     }
-    last_toggle_time_ns_ = now_ns;
+    trigger_pressed_ = true;
   }
 
-  current_ = resolved_state;
   return current_;
 }
 
