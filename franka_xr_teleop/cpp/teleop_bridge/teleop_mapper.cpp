@@ -94,7 +94,10 @@ void TeleopMapper::ComputeMappedPoseFromAnchors(const Pose& xr_filtered_pose,
   const Eigen::Vector3d xr_rot_delta_raw = QuaternionErrorAngleAxis(xr_anchor, xr_current);
   const std::array<double, 3> xr_rot_array =
       ApplyVectorDeadband(ToArray3(xr_rot_delta_raw), config_.teleop.xr_rotation_deadband_rad);
-  const std::array<double, 3> robot_rot_array = RotateXrVectorToRobot(xr_rot_array);
+  std::array<double, 3> robot_rot_array = RotateXrVectorToRobot(xr_rot_array);
+  for (double& value : robot_rot_array) {
+    value *= config_.teleop.rotation_scale_factor;
+  }
   const Eigen::Vector3d robot_rot_delta(
       robot_rot_array[0], robot_rot_array[1], robot_rot_array[2]);
 

@@ -181,7 +181,13 @@ struct SafetyLimits {
 
 struct TeleopRuntimeConfig {
   ControlMode control_mode = ControlMode::kPose;
+  // Translation gain: robot_delta_m = scale_factor * xr_delta_m.
+  // Values > 1.0 make the robot move farther than your hand (more
+  // responsive), < 1.0 attenuate for fine-grained control.
   double scale_factor = 0.8;
+  // Rotation gain: robot_rot_delta_rad = rotation_scale_factor * xr_rot_delta_rad.
+  // Default 1.0 preserves legacy 1:1 rotation mapping.
+  double rotation_scale_factor = 1.0;
   double control_trigger_threshold = 0.9;
   double control_trigger_release_threshold = 0.8;
   double xr_pose_lowpass_alpha = 0.2;
