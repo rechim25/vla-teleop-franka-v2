@@ -41,6 +41,7 @@ constexpr double kStartupHomeServoKd = 1.5;
 constexpr double kStartupHomeArrivalToleranceRad = 5e-3;
 constexpr double kStartupHomeVelocityToleranceRadPerS = 2e-2;
 constexpr uint32_t kStartupHomeSettledCycles = 100;
+constexpr uint64_t kPlannerTargetGraceNs = 35000000ull;  // 35 ms
 
 void ConfigureConservativeBehavior(franka::Robot* robot) {
   robot->setCollisionBehavior(
@@ -308,7 +309,9 @@ class JointPositionTrajectoryGenerator {
 
   void Reset() {
     initialized_ = false;
+    motion_active_ = false;
     hold_active_ = false;
+    hold_target_q_.fill(0.0);
     q_ref_.fill(0.0);
     dq_ref_.fill(0.0);
     ddq_ref_.fill(0.0);
@@ -322,20 +325,24 @@ class JointPositionTrajectoryGenerator {
                                std::array<double, 7>* filtered_delta,
                                std::array<double, 7>* command_delta,
                                std::array<uint8_t, 7>* clamp_saturated) {
-    if (!apply_motion) {
-      Reset();
-      target_delta->fill(0.0);
-      filtered_delta->fill(0.0);
-      command_delta->fill(0.0);
-      clamp_saturated->fill(0);
-      return reference_q;
-    }
-
     if (!initialized_) {
       q_ref_ = reference_q;
       dq_ref_.fill(0.0);
       ddq_ref_.fill(0.0);
+      hold_target_q_ = q_ref_;
       initialized_ = true;
+    }
+
+    if (!apply_motion) {
+      if (motion_active_) {
+        // Latch the robot's current commanded reference to avoid a small rewind
+        // when teleop gating drops between frames.
+        hold_target_q_ = reference_q;
+      }
+      motion_active_ = false;
+    } else {
+      motion_active_ = true;
+      hold_target_q_ = target_q;
     }
 
     dt = std::max(dt, 1e-6);
@@ -344,15 +351,60 @@ class JointPositionTrajectoryGenerator {
                                             : max_step_from_velocity;
     const double max_delta_acceleration = max_jerk_ * dt;
 
+    if (!apply_motion) {
+      // Coast-down mode: damp residual trajectory velocity to zero without
+      // pulling back toward a latched position target.
+      std::array<double, 7> q_out = q_ref_;
+      std::array<double, 7> dq_out = dq_ref_;
+      std::array<double, 7> ddq_out = ddq_ref_;
+      target_delta->fill(0.0);
+      command_delta->fill(0.0);
+      clamp_saturated->fill(0);
+
+      for (size_t i = 0; i < 7; ++i) {
+        (*filtered_delta)[i] = q_ref_[i] - reference_q[i];
+        const double desired_acceleration =
+            std::clamp(-hold_velocity_damping_ * dq_ref_[i], -max_acceleration_, max_acceleration_);
+        ddq_out[i] = ddq_ref_[i] +
+                     std::clamp(desired_acceleration - ddq_ref_[i],
+                                -max_delta_acceleration,
+                                max_delta_acceleration);
+        ddq_out[i] = std::clamp(ddq_out[i], -max_acceleration_, max_acceleration_);
+
+        const double velocity_unclamped = dq_ref_[i] + ddq_out[i] * dt;
+        dq_out[i] = std::clamp(velocity_unclamped, -max_velocity_, max_velocity_);
+        if ((dq_ref_[i] > 0.0 && dq_out[i] < 0.0) || (dq_ref_[i] < 0.0 && dq_out[i] > 0.0)) {
+          dq_out[i] = 0.0;
+          ddq_out[i] = 0.0;
+        }
+
+        const double step_unclamped = dq_out[i] * dt;
+        const double step = std::clamp(step_unclamped, -max_step, max_step);
+        q_out[i] = q_ref_[i] + step;
+        (*command_delta)[i] = q_out[i] - reference_q[i];
+        if (std::abs(velocity_unclamped - dq_out[i]) > 1e-12 || std::abs(step_unclamped - step) > 1e-12) {
+          (*clamp_saturated)[i] = 1;
+        }
+      }
+
+      q_ref_ = q_out;
+      dq_ref_ = dq_out;
+      ddq_ref_ = ddq_out;
+      hold_target_q_ = q_ref_;
+      return q_out;
+    }
+
+    const std::array<double, 7>& active_target_q = target_q;
+
     for (size_t i = 0; i < 7; ++i) {
-      (*target_delta)[i] = target_q[i] - reference_q[i];
+      (*target_delta)[i] = active_target_q[i] - reference_q[i];
       (*filtered_delta)[i] = q_ref_[i] - reference_q[i];
     }
 
     double max_abs_hold_error = 0.0;
     bool within_hold_band = true;
     for (size_t i = 0; i < 7; ++i) {
-      const double error_to_ref = target_q[i] - q_ref_[i];
+      const double error_to_ref = active_target_q[i] - q_ref_[i];
       max_abs_hold_error = std::max(max_abs_hold_error, std::abs(error_to_ref));
       if (std::abs(error_to_ref) > hold_position_threshold_ ||
           std::abs(dq_ref_[i]) > hold_velocity_threshold_) {
@@ -385,7 +437,7 @@ class JointPositionTrajectoryGenerator {
     clamp_saturated->fill(0);
 
     for (size_t i = 0; i < 7; ++i) {
-      double error = target_q[i] - q_ref_[i];
+      double error = active_target_q[i] - q_ref_[i];
       if (std::abs(error) < joint_deadzone_) {
         error = 0.0;
       }
@@ -408,9 +460,9 @@ class JointPositionTrajectoryGenerator {
       q_out[i] = q_ref_[i] + step;
 
       if (error != 0.0) {
-        const double new_error = target_q[i] - q_out[i];
+        const double new_error = active_target_q[i] - q_out[i];
         if ((error > 0.0 && new_error < 0.0) || (error < 0.0 && new_error > 0.0)) {
-          q_out[i] = target_q[i];
+          q_out[i] = active_target_q[i];
           dq_out[i] = 0.0;
           ddq_out[i] = 0.0;
         }
@@ -439,11 +491,14 @@ class JointPositionTrajectoryGenerator {
   double joint_deadzone_ = 0.001;
   double servo_kp_ = 60.0;
   double servo_kd_ = 10.0;
+  double hold_velocity_damping_ = 12.0;
   double hold_position_threshold_ = 0.0008;
   double hold_velocity_threshold_ = 0.01;
   double hold_release_threshold_ = 0.0016;
   bool initialized_ = false;
+  bool motion_active_ = false;
   bool hold_active_ = false;
+  std::array<double, 7> hold_target_q_{};
   std::array<double, 7> q_ref_{};
   std::array<double, 7> dq_ref_{};
   std::array<double, 7> ddq_ref_{};
@@ -468,6 +523,12 @@ void PlannerLoop(const TeleopBridgeConfig& config,
     TeleopMapper mapper(config);
     TeleopStateMachine state_machine;
     bool deadman_latched = false;
+    bool has_recent_target = false;
+    uint64_t last_valid_target_ns = 0;
+    std::array<double, 7> last_valid_target_q{};
+    Pose last_valid_desired_pose{};
+    ControlMode last_valid_control_mode = ControlMode::kHold;
+    double last_valid_manipulability = 0.0;
     uint64_t planner_last_ns = 0;
     uint64_t planner_trace_counter = 0;
     const uint32_t planner_trace_decimation = std::max<uint32_t>(1, trace_decimation);
@@ -577,6 +638,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       }
 
       if (!planned.teleop_active) {
+        has_recent_target = false;
         mapper.Reset();
         planned_target_buffer->Publish(planned);
         publish_trace();
@@ -595,7 +657,18 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       planned.requested_action = requested_action;
       planned.requested_action.gripper_command = gripper_command;
       if (!has_target) {
-        planned.control_mode = ControlMode::kHold;
+        const bool can_reuse_target =
+            has_recent_target && now_ns > last_valid_target_ns &&
+            (now_ns - last_valid_target_ns) <= kPlannerTargetGraceNs;
+        if (can_reuse_target) {
+          planned.control_mode = last_valid_control_mode;
+          planned.target_q = last_valid_target_q;
+          planned.desired_tcp_pose = last_valid_desired_pose;
+          planned.manipulability = last_valid_manipulability;
+          planned.target_fresh = true;
+        } else {
+          planned.control_mode = ControlMode::kHold;
+        }
         planned_target_buffer->Publish(planned);
         publish_trace();
         std::this_thread::sleep_for(sleep_period);
@@ -618,7 +691,18 @@ void PlannerLoop(const TeleopBridgeConfig& config,
                           &manipulability);
       if (!ik_ok) {
         planned.faults.ik_rejected = true;
-        planned.control_mode = ControlMode::kHold;
+        const bool can_reuse_target =
+            has_recent_target && now_ns > last_valid_target_ns &&
+            (now_ns - last_valid_target_ns) <= kPlannerTargetGraceNs;
+        if (can_reuse_target) {
+          planned.control_mode = last_valid_control_mode;
+          planned.target_q = last_valid_target_q;
+          planned.desired_tcp_pose = last_valid_desired_pose;
+          planned.manipulability = last_valid_manipulability;
+          planned.target_fresh = true;
+        } else {
+          planned.control_mode = ControlMode::kHold;
+        }
         planned_target_buffer->Publish(planned);
         publish_trace();
         std::this_thread::sleep_for(sleep_period);
@@ -628,6 +712,12 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       planned.target_q = q_target;
       planned.manipulability = manipulability;
       planned.target_fresh = true;
+      has_recent_target = true;
+      last_valid_target_ns = now_ns;
+      last_valid_target_q = q_target;
+      last_valid_desired_pose = safe_pose;
+      last_valid_control_mode = planned.control_mode;
+      last_valid_manipulability = manipulability;
       planned_target_buffer->Publish(planned);
       publish_trace();
       std::this_thread::sleep_for(sleep_period);
