@@ -181,6 +181,7 @@ bool LoadTeleopConfig(const std::string& path, AppConfig* config, std::string* e
     ReadScalar(gripper, "stall_timeout_s", &config->bridge.gripper.stall_timeout_s);
     ReadScalar(gripper, "width_tolerance_m", &config->bridge.gripper.width_tolerance_m);
     ReadScalar(gripper, "read_failure_timeout_s", &config->bridge.gripper.read_failure_timeout_s);
+    ReadScalar(gripper, "grasp_force_n", &config->bridge.gripper.grasp_force_n);
   }
 
   return true;

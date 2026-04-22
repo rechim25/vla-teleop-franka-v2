@@ -211,6 +211,10 @@ struct GripperConfig {
   double stall_timeout_s = 0.25;
   double width_tolerance_m = 0.002;
   double read_failure_timeout_s = 0.50;
+  // Force applied when closing via franka::Gripper::grasp(). A modest value
+  // is enough to hold light teleop objects without damaging them; the
+  // firmware uses this to decide when an object is contacted.
+  double grasp_force_n = 20.0;
 };
 
 struct IkConfig {

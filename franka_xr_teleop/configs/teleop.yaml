@@ -46,8 +46,9 @@ teleop:
     max_command_rate_hz: 20.0
     open_threshold: 0.30
     close_threshold: 0.70
-    toggle_debounce_s: 0.08
+    toggle_debounce_s: 0.30
     stall_width_delta_m: 0.001
     stall_timeout_s: 0.25
     width_tolerance_m: 0.002
     read_failure_timeout_s: 0.50
+    grasp_force_n: 20.0

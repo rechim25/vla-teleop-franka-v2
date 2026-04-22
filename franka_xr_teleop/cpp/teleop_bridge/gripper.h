@@ -18,6 +18,8 @@ class GripperController {
 
  private:
   GripperState current_ = GripperState::kOpen;
+  uint64_t last_toggle_time_ns_ = 0;
+  bool trigger_pressed_ = false;
 };
 
 }  // namespace teleop

@@ -591,15 +591,6 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       planned.desired_tcp_pose = robot.tcp_pose;
       planned.control_mode = ControlMode::kHold;
       const double gripper_trigger = Clamp01(xr_cmd.gripper_trigger_value);
-      const double gripper_rearm_threshold =
-          std::clamp(config.gripper.close_threshold - 0.01,
-                     config.gripper.open_threshold,
-                     config.gripper.close_threshold);
-      if (gripper_trigger <= gripper_rearm_threshold) {
-        // Re-align toggle baseline with measured gripper state while trigger is released.
-        // This prevents stale planner-side state after object contact (HOLD).
-        gripper_controller.SyncCurrentState(active_gripper_state->load(std::memory_order_acquire));
-      }
       const GripperState desired_state =
           gripper_controller.UpdateDesiredState(config.gripper, gripper_trigger, now_ns);
       const double gripper_command = desired_state == GripperState::kClose ? 1.0 : 0.0;
@@ -786,6 +777,15 @@ void PlannerLoop(const TeleopBridgeConfig& config,
   }
 }
 
+// Simple gripper control loop (rewritten from scratch).
+//
+// Contract (exactly as the user requested):
+//   * State OPEN  + press -> close. If fingers stop moving (object grasped or
+//     fully closed), issue stop() and latch state = CLOSE.
+//   * State CLOSE + press -> open, move to max width, then latch state = OPEN.
+//
+// Only two logical states: kOpen and kClose. No preemption, no retry
+// escalation, no homing recovery. One action runs until it self-terminates.
 void GripperLoop(franka::Gripper* gripper,
                  const GripperConfig& config,
                  const std::atomic<GripperState>* desired_gripper_state,
@@ -796,186 +796,198 @@ void GripperLoop(franka::Gripper* gripper,
     franka::GripperState measured_state = gripper->readOnce();
     measured_gripper_width_m->store(measured_state.width, std::memory_order_release);
 
+    // Initial logical state purely from measured width.
     GripperState current_state =
-        measured_state.width >= (config.max_width_m - config.width_tolerance_m) ? GripperState::kOpen
-                                                                                 : GripperState::kHold;
+        (measured_state.width >= (config.max_width_m - config.width_tolerance_m))
+            ? GripperState::kOpen
+            : GripperState::kClose;
     active_gripper_state->store(current_state, std::memory_order_release);
 
+    auto log_state = [](const char* label, GripperState s, double width) {
+      const uint64_t t = MonotonicNowNs();
+      std::cout << "Gripper " << label << " state=" << ToString(s) << " width=" << width
+                << " t_ms=" << (static_cast<double>(t) * 1e-6) << "\n";
+    };
+    log_state("init", current_state, measured_state.width);
+
     bool action_in_progress = false;
-    GripperState action_target_state = current_state;
+    GripperState action_target = current_state;
     std::future<bool> action_future;
-    bool action_abort_expected = false;
-    const char* action_abort_reason = "";
-    double stall_reference_width = measured_state.width;
-    uint64_t last_width_progress_ns = MonotonicNowNs();
-    uint64_t last_successful_read_ns = last_width_progress_ns;
+    double stall_ref_width = measured_state.width;
+    uint64_t stall_ref_ns = MonotonicNowNs();
+    uint64_t last_read_ok_ns = stall_ref_ns;
+    GripperState last_desired_logged = desired_gripper_state->load(std::memory_order_acquire);
+
+    constexpr auto kLoopSleep = std::chrono::milliseconds(10);
 
     auto set_state = [&](GripperState next_state, const char* reason) {
-      if (current_state != next_state) {
-        std::cout << "Gripper state " << ToString(current_state) << " -> " << ToString(next_state)
-                  << " reason=" << reason << "\n";
-      }
+      if (current_state == next_state) return;
+      const uint64_t t = MonotonicNowNs();
+      std::cout << "Gripper state " << ToString(current_state) << " -> " << ToString(next_state)
+                << " reason=" << reason
+                << " t_ms=" << (static_cast<double>(t) * 1e-6) << "\n";
       current_state = next_state;
       active_gripper_state->store(current_state, std::memory_order_release);
     };
 
-    auto wait_for_action_completion = [&]() -> bool {
-      if (!action_in_progress) {
-        return true;
-      }
+    // Waits for the outstanding async move() to finish; swallows exceptions.
+    auto drain_future = [&]() {
+      if (!action_future.valid()) return;
       try {
         (void)action_future.get();
       } catch (const std::exception& e) {
-        if (action_abort_expected) {
-          std::cout << "Gripper action preempted: reason=" << action_abort_reason << "\n";
-          action_in_progress = false;
-          action_abort_expected = false;
-          action_abort_reason = "";
-          return true;
-        }
-        std::cerr << "Gripper action completion failed: " << e.what() << "\n";
-        set_state(GripperState::kFault, "action_completion_exception");
-        action_in_progress = false;
-        return false;
+        std::cerr << "Gripper action ended with exception (ignored): " << e.what() << "\n";
+      } catch (...) {
+        std::cerr << "Gripper action ended with unknown exception (ignored)\n";
       }
       action_in_progress = false;
-      action_abort_expected = false;
-      action_abort_reason = "";
-      return true;
     };
 
-    auto preempt_action = [&](const char* reason) -> bool {
-      if (!action_in_progress) {
-        return true;
-      }
-      action_abort_expected = true;
-      action_abort_reason = reason;
-      try {
-        (void)gripper->stop();
-      } catch (const std::exception& e) {
-        std::cerr << "Gripper stop failed during preemption: " << e.what() << "\n";
-        set_state(GripperState::kFault, "preempt_stop_failed");
-        action_in_progress = false;
-        action_abort_expected = false;
-        action_abort_reason = "";
-        return false;
-      }
-      return wait_for_action_completion();
-    };
-
-    auto start_action = [&](GripperState target_state, uint64_t now_ns) {
-      const double target_width = MapStateToWidth(config, target_state);
-      action_target_state = target_state;
-      action_abort_expected = false;
-      action_abort_reason = "";
-      stall_reference_width = measured_state.width;
-      last_width_progress_ns = now_ns;
-      action_future = std::async(std::launch::async, [gripper, target_width, speed = config.speed_mps]() {
-        return gripper->move(target_width, speed);
-      });
+    // CLOSE uses franka::Gripper::grasp(). grasp() self-terminates when the
+    // fingers contact an object (force threshold in firmware) or reach target
+    // width, so we never need to call stop() from another thread (which would
+    // violate libfranka's non-thread-safe contract).
+    //
+    // Large epsilon_outer + tiny epsilon_inner means "grasp succeeds if
+    // fingers stop anywhere from 0 to max_width" - we treat any contact or
+    // full close as a successful close, matching the user's spec.
+    auto start_close = [&]() {
+      const uint64_t t = MonotonicNowNs();
+      const double target_w = config.min_width_m;
+      const double speed = config.speed_mps;
+      const double force = config.grasp_force_n;
+      const double epsilon_inner = 0.002;  // small tolerance below target
+      const double epsilon_outer = config.max_width_m;  // accept any contact above target
+      std::cout << "Gripper start_close (grasp) target=" << target_w
+                << " force=" << force
+                << " speed=" << speed
+                << " epsilon_outer=" << epsilon_outer
+                << " measured_width=" << measured_state.width
+                << " t_ms=" << (static_cast<double>(t) * 1e-6) << "\n";
+      action_target = GripperState::kClose;
+      stall_ref_width = measured_state.width;
+      stall_ref_ns = t;
       action_in_progress = true;
-      set_state(target_state, target_state == GripperState::kOpen ? "command_open" : "command_close");
+      action_future = std::async(std::launch::async,
+                                 [gripper, target_w, speed, force, epsilon_inner, epsilon_outer]() {
+                                   return gripper->grasp(target_w, speed, force,
+                                                         epsilon_inner, epsilon_outer);
+                                 });
+    };
+
+    auto start_open = [&]() {
+      const uint64_t t = MonotonicNowNs();
+      std::cout << "Gripper start_open width_target=" << config.max_width_m
+                << " measured_width=" << measured_state.width
+                << " t_ms=" << (static_cast<double>(t) * 1e-6) << "\n";
+      action_target = GripperState::kOpen;
+      stall_ref_width = measured_state.width;
+      stall_ref_ns = t;
+      action_in_progress = true;
+      action_future = std::async(std::launch::async,
+                                 [gripper, width = config.max_width_m, speed = config.speed_mps]() {
+                                   return gripper->move(width, speed);
+                                 });
     };
 
     while (!stop_requested->load(std::memory_order_acquire)) {
       const uint64_t now_ns = MonotonicNowNs();
       const GripperState desired_state = desired_gripper_state->load(std::memory_order_acquire);
 
+      if (desired_state != last_desired_logged) {
+        std::cout << "Gripper desired_state " << ToString(last_desired_logged) << " -> "
+                  << ToString(desired_state)
+                  << " current=" << ToString(current_state)
+                  << " action_in_progress=" << (action_in_progress ? 1 : 0)
+                  << " action_target=" << ToString(action_target)
+                  << " t_ms=" << (static_cast<double>(now_ns) * 1e-6) << "\n";
+        last_desired_logged = desired_state;
+      }
+
+      // Read measured gripper state (non-fatal on transient errors).
       try {
         measured_state = gripper->readOnce();
         measured_gripper_width_m->store(measured_state.width, std::memory_order_release);
-        last_successful_read_ns = now_ns;
+        last_read_ok_ns = now_ns;
       } catch (const std::exception& e) {
-        if (static_cast<double>(now_ns - last_successful_read_ns) * 1e-9 >=
+        if (static_cast<double>(now_ns - last_read_ok_ns) * 1e-9 >=
             config.read_failure_timeout_s) {
           std::cerr << "Gripper read failed persistently: " << e.what() << "\n";
-          set_state(GripperState::kFault, "read_failure_timeout");
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        continue;
-      }
-
-      if (action_in_progress && action_future.valid() &&
-          action_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-        try {
-          const bool success = action_future.get();
-          action_in_progress = false;
-          action_abort_expected = false;
-          action_abort_reason = "";
-          if (current_state != GripperState::kFault) {
-            if (action_target_state == GripperState::kOpen) {
-              if (success || measured_state.width >= (config.max_width_m - config.width_tolerance_m)) {
-                set_state(GripperState::kOpen, "open_complete");
-              } else {
-                std::cerr << "Gripper open command returned false.\n";
-                set_state(GripperState::kFault, "open_failed");
-              }
-            } else if (action_target_state == GripperState::kClose) {
-              if (success || measured_state.width <= (config.min_width_m + config.width_tolerance_m)) {
-                set_state(GripperState::kClose, "close_complete");
-              } else {
-                set_state(GripperState::kHold, "close_contact");
-              }
-            }
-          }
-        } catch (const std::exception& e) {
-          if (action_abort_expected) {
-            std::cout << "Gripper action preempted: reason=" << action_abort_reason << "\n";
-            action_in_progress = false;
-            action_abort_expected = false;
-            action_abort_reason = "";
-          } else {
-            std::cerr << "Gripper command failed: " << e.what() << "\n";
-            set_state(GripperState::kFault, "command_exception");
-          }
-        }
-      }
-
-      if (current_state == GripperState::kFault) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::this_thread::sleep_for(kLoopSleep);
         continue;
       }
 
       if (action_in_progress) {
-        if (desired_state == GripperState::kOpen && action_target_state != GripperState::kOpen) {
-          if (!preempt_action("latest_open")) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            continue;
+        // 1) Did the async move() finish by itself?
+        if (action_future.valid() &&
+            action_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+          bool success = false;
+          try {
+            success = action_future.get();
+          } catch (const std::exception& e) {
+            std::cerr << "Gripper move() threw: " << e.what() << "\n";
           }
-        } else if (desired_state == GripperState::kClose && action_target_state != GripperState::kClose) {
-          if (!preempt_action("latest_close")) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            continue;
+          std::cout << "Gripper action completed target=" << ToString(action_target)
+                    << " success=" << (success ? 1 : 0)
+                    << " measured_width=" << measured_state.width
+                    << " t_ms=" << (static_cast<double>(MonotonicNowNs()) * 1e-6) << "\n";
+          action_in_progress = false;
+          // Latch state to the action we attempted - user's spec:
+          //   "if the gripper stops moving ... set state to closed"
+          //   "open ... until full open then set gripper state to open"
+          // So on completion (or even on failure), the action_target is what
+          // we consider the new state, regardless of move()'s return value.
+          set_state(action_target,
+                    action_target == GripperState::kOpen ? "open_done" : "close_done");
+          std::this_thread::sleep_for(kLoopSleep);
+          continue;
+        }
+
+        // For close (grasp()): the firmware self-terminates on contact or
+        // full close, so no per-tick stall detection is needed. We still
+        // enforce a long safety timeout in case grasp() itself misbehaves,
+        // so the gripper thread never wedges indefinitely.
+        const double kCloseSafetyTimeoutS = 5.0;
+        const double kOpenSafetyTimeoutS = 5.0;
+        const double elapsed_s = static_cast<double>(now_ns - stall_ref_ns) * 1e-9;
+        const double safety_timeout_s = action_target == GripperState::kClose
+                                            ? kCloseSafetyTimeoutS
+                                            : kOpenSafetyTimeoutS;
+        if (elapsed_s >= safety_timeout_s) {
+          std::cerr << "Gripper action exceeded safety timeout ("
+                    << safety_timeout_s << "s) target=" << ToString(action_target)
+                    << " width=" << measured_state.width
+                    << "; forcing stop().\n";
+          try {
+            (void)gripper->stop();
+          } catch (const std::exception& e) {
+            std::cerr << "Gripper safety stop() failed: " << e.what() << "\n";
           }
-        } else if (action_target_state == GripperState::kClose) {
-          const double width_delta = std::abs(measured_state.width - stall_reference_width);
-          if (width_delta >= config.stall_width_delta_m) {
-            stall_reference_width = measured_state.width;
-            last_width_progress_ns = now_ns;
-          } else if (measured_state.width > (config.min_width_m + config.width_tolerance_m) &&
-                     static_cast<double>(now_ns - last_width_progress_ns) * 1e-9 >=
-                         config.stall_timeout_s) {
-            if (!preempt_action("close_stall")) {
-              std::this_thread::sleep_for(std::chrono::milliseconds(20));
-              continue;
-            }
-            if (current_state != GripperState::kFault) {
-              set_state(GripperState::kHold, "close_stall");
-            }
+          drain_future();
+          set_state(action_target,
+                    action_target == GripperState::kOpen ? "open_timeout" : "close_timeout");
+          std::this_thread::sleep_for(kLoopSleep);
+          continue;
+        }
+      } else {
+        // 3) No action running - dispatch if desired differs from current.
+        if (desired_state != current_state) {
+          if (desired_state == GripperState::kClose) {
+            start_close();
+          } else if (desired_state == GripperState::kOpen) {
+            start_open();
           }
         }
       }
 
-      if (!action_in_progress && current_state != GripperState::kFault &&
-          !GripperStateSatisfiesDesired(current_state, desired_state)) {
-        start_action(desired_state, now_ns);
-      }
-
-      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      std::this_thread::sleep_for(kLoopSleep);
     }
 
+    // Shutdown: make sure any outstanding async move() is drained.
     if (action_in_progress) {
-      (void)preempt_action("shutdown");
+      try { (void)gripper->stop(); } catch (...) {}
+      drain_future();
     }
   } catch (const std::exception& e) {
     std::cerr << "Gripper thread exception: " << e.what() << "\n";
@@ -1109,7 +1121,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
                                                                      (config_.gripper.max_width_m -
                                                                       config_.gripper.width_tolerance_m)
                                                                  ? GripperState::kOpen
-                                                                 : GripperState::kHold));
+                                                                 : GripperState::kClose));
     std::atomic<GripperState> active_gripper_state{initial_gripper_state};
     planner_thread = std::thread(PlannerLoop,
                                  std::cref(config_),
