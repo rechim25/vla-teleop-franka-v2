@@ -142,6 +142,7 @@ struct PlannedTarget {
   ControlMode control_mode = ControlMode::kHold;
   bool teleop_active = false;
   bool target_fresh = false;
+  bool episode_start = false;
   double manipulability = 0.0;
   TeleopAction requested_action{};
   TeleopState teleop_state = TeleopState::kDisconnected;
@@ -163,6 +164,7 @@ struct RobotObservation {
   uint64_t target_age_ns = 0;
   bool target_fresh = false;
   bool teleop_active = false;
+  bool episode_start = false;
   double target_manipulability = 0.0;
   FaultFlags faults{};
 };

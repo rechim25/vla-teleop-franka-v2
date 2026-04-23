@@ -1,0 +1,39 @@
+recording_root: recordings
+
+robot:
+  enabled: true
+  bind_ip: 0.0.0.0
+  port: 28081
+  with_receive_metadata: false
+  flush_every: 50
+  fsync_every: 0
+  print_hz: 1.0
+
+zed:
+  enabled: true
+  camera_name: ee_zed_m
+  serial: 0
+  resolution: HD720
+  fps: 30
+  width: 0
+  height: 0
+  svo: false
+  svo_compression: H264
+  depth: false
+  video_codec: mp4v
+  print_hz: 1.0
+
+realsense:
+  enabled: true
+  camera_name: third_person_d405
+  serial: "128422271175"
+  color_width: 1280
+  color_height: 720
+  depth_width: 640
+  depth_height: 480
+  fps: 30
+  depth: false
+  align_depth: true
+  bag: false
+  video_codec: mp4v
+  print_hz: 1.0

@@ -94,6 +94,7 @@ std::string ObservationPublisher::ToJson(const RobotObservation& obs) const {
   ss << "\"target_age_ns\":" << obs.target_age_ns << ',';
   ss << "\"target_fresh\":" << (obs.target_fresh ? "true" : "false") << ',';
   ss << "\"teleop_active\":" << (obs.teleop_active ? "true" : "false") << ',';
+  ss << "\"episode_start\":" << (obs.episode_start ? "true" : "false") << ',';
   ss << "\"target_manipulability\":" << obs.target_manipulability << ',';
   ss << "\"fault_flags\":{";
   ss << "\"packet_timeout\":" << (obs.faults.packet_timeout ? "true" : "false") << ',';

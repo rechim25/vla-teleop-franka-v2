@@ -110,6 +110,9 @@ If SDK paths are non-default, pass `-DXROBOTICS_SDK_ROOT=/path/to/SDK`.
 
 ## Run
 
+For dataset recording workflows with robot observations and cameras, see
+[`DATA_COLLECTION.md`](DATA_COLLECTION.md).
+
 Dry-run (SDK input only, no robot motion):
 
 ```bash
@@ -122,6 +125,54 @@ Live teleop:
 ./build/cpp/teleop_bridge/franka_xr_teleop_bridge \
   --robot-ip 192.168.2.200 \
   --obs-port 28081
+```
+
+Record one dataset session from the UDP robot stream plus the configured
+cameras:
+
+```bash
+./tools/record_data_collection_session.py \
+  --recording-id session_001
+```
+
+The teleop bridge should already be running with `--obs-port 28081` or the
+matching port from `configs/data_collection.yaml`.
+
+Or manually record only UDP robot observations:
+
+```bash
+./tools/record_robot_observations.py \
+  --port 28081 \
+  --output recordings/session_001/robot.jsonl
+```
+
+Add `--with-receive-metadata` to include host receive timestamps and source
+address around each observation record. Pressing the Oculus right-controller B
+button emits a one-shot `status.episode_start` marker in the UDP stream; the
+recorder writes those markers to `recordings/session_001/episode_events.jsonl`
+by default.
+
+Record the end-effector ZED/ZED-M camera on the same host:
+
+```bash
+./tools/record_zed_camera.py \
+  --camera-name ee_zed_m \
+  --output-dir recordings/session_001/cameras/ee_zed_m \
+  --svo
+```
+
+This writes `rgb.mp4` for convenient playback/classification, `frames.jsonl`
+with one host monotonic timestamp per frame, and optionally `raw.svo` for ZED
+SDK playback or later re-extraction. Use `--depth` if metric depth should also
+be saved as per-frame compressed arrays.
+
+Align robot observations to camera frames after recording:
+
+```bash
+./tools/align_robot_camera_jsonl.py \
+  --robot-jsonl recordings/session_001/robot.jsonl \
+  --camera ee_zed_m recordings/session_001/cameras/ee_zed_m/frames.jsonl \
+  --output recordings/session_001/aligned_samples.jsonl
 ```
 
 Save the robot's current joint positions as the startup home pose:
