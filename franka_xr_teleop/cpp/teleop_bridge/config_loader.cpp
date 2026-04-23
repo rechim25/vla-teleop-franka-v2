@@ -100,6 +100,9 @@ bool LoadTeleopConfig(const std::string& path, AppConfig* config, std::string* e
   }
   ReadScalar(teleop, "allow_motion", &config->bridge.allow_motion);
   ReadScalar(teleop, "dry_run", &config->dry_run);
+  ReadScalar(teleop,
+             "a_button_toggles_robot_control",
+             &config->bridge.teleop.a_button_toggles_robot_control);
   ReadScalar(teleop, "scale_factor", &config->bridge.teleop.scale_factor);
   ReadScalar(teleop, "rotation_scale_factor", &config->bridge.teleop.rotation_scale_factor);
   ReadScalar(teleop, "control_trigger_threshold", &config->bridge.teleop.control_trigger_threshold);

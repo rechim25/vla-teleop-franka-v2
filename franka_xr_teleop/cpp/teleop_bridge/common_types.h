@@ -143,6 +143,7 @@ struct PlannedTarget {
   bool teleop_active = false;
   bool target_fresh = false;
   bool episode_start = false;
+  bool episode_end = false;
   double manipulability = 0.0;
   TeleopAction requested_action{};
   TeleopState teleop_state = TeleopState::kDisconnected;
@@ -165,6 +166,7 @@ struct RobotObservation {
   bool target_fresh = false;
   bool teleop_active = false;
   bool episode_start = false;
+  bool episode_end = false;
   double target_manipulability = 0.0;
   FaultFlags faults{};
 };
@@ -183,6 +185,9 @@ struct SafetyLimits {
 
 struct TeleopRuntimeConfig {
   ControlMode control_mode = ControlMode::kPose;
+  // Mirror the XR client "Switch w/ A Button" option. When enabled, the bridge
+  // does not treat A as an episode-start button.
+  bool a_button_toggles_robot_control = false;
   // Translation gain: robot_delta_m = scale_factor * xr_delta_m.
   // Values > 1.0 make the robot move farther than your hand (more
   // responsive), < 1.0 attenuate for fine-grained control.

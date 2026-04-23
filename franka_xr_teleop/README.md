@@ -55,9 +55,18 @@ franka_xr_teleop/
 The bridge maps the **right controller** fields from XR-Robotics state JSON to teleop semantics:
 - `grip`: deadman / arm-enable trigger
 - `trigger`: gripper command `[0,1]` mapped to binary open/close with hold-on-contact semantics
-- `primaryButton` (A): available for future bindings
-- `secondaryButton` (B): available for future bindings
+- `primaryButton` (A): episode start marker when `teleop.a_button_toggles_robot_control: false`
+- `secondaryButton` (B): episode end marker in that same mode, otherwise legacy start/split marker
 - `pose` (`x,y,z,qx,qy,qz,qw`): target position/orientation input
+
+Important: `teleop.a_button_toggles_robot_control` in `configs/teleop.yaml` must
+match the Quest app's main-menu `Switch w/ A Button` setting.
+
+- If Quest `Switch w/ A Button` is `Off`, set
+  `teleop.a_button_toggles_robot_control: false` so `A=start` and `B=end`.
+- If Quest `Switch w/ A Button` is `On`, set
+  `teleop.a_button_toggles_robot_control: true` so the bridge does not steal
+  `A` from the Quest-side control toggle.
 
 ## Message Contract (Internal)
 

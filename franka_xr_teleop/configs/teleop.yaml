@@ -4,6 +4,7 @@ teleop:
   observation_port: 28081
   allow_motion: true
   dry_run: false
+  a_button_toggles_robot_control: false
   control_mode: position
   scale_factor: 2.5
   rotation_scale_factor: 1.0

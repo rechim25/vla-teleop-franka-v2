@@ -55,6 +55,7 @@
         "teleop_state": {"type": "string"},
         "packet_age_ns": {"type": "integer", "minimum": 0},
         "episode_start": {"type": "boolean"},
+        "episode_end": {"type": "boolean"},
         "fault_flags": {"type": "object"}
       }
     }

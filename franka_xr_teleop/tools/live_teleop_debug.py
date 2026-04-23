@@ -115,6 +115,7 @@ def main() -> int:
             teleop_active = bool(safe_get(status, "teleop_active", default=False))
             target_fresh = bool(safe_get(status, "target_fresh", default=False))
             episode_start = bool(safe_get(status, "episode_start", default=False))
+            episode_end = bool(safe_get(status, "episode_end", default=False))
             packet_age_ms = float(safe_get(status, "packet_age_ns", default=0)) * 1e-6
             target_age_ms = float(safe_get(status, "target_age_ns", default=0)) * 1e-6
             manip = float(safe_get(status, "target_manipulability", default=0.0))
@@ -142,7 +143,8 @@ def main() -> int:
                         f"mode={control_mode}",
                         f"active={int(teleop_active)}",
                         f"fresh={int(target_fresh)}",
-                        f"episode={int(episode_start)}",
+                        f"ep_start={int(episode_start)}",
+                        f"ep_end={int(episode_end)}",
                         f"pkt_age={packet_age_ms:6.1f}ms",
                         f"tgt_age={target_age_ms:6.1f}ms",
                         f"tcp=({float(tcp[0]):+.3f},{float(tcp[1]):+.3f},{float(tcp[2]):+.3f})",

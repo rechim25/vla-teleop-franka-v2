@@ -58,8 +58,9 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Episode marker JSONL path. Defaults to episode_events.jsonl next to "
-            "--output. A row is written when status.episode_start is true."
+            "Episode event JSONL path. Defaults to episode_events.jsonl next to "
+            "--output. Rows are written on rising edges of status.episode_start "
+            "and status.episode_end."
         ),
     )
     parser.add_argument(
@@ -154,9 +155,11 @@ def safe_get(d: Dict[str, Any], *keys: str, default: Any = None) -> Any:
     return cur
 
 
-def make_episode_event(obs: Dict[str, Any], addr: Tuple[str, int], packet_index: int) -> Dict[str, Any]:
+def make_episode_event(
+    event_name: str, obs: Dict[str, Any], addr: Tuple[str, int], packet_index: int
+) -> Dict[str, Any]:
     return {
-        "event": "episode_start",
+        "event": event_name,
         "robot_timestamp_ns": safe_get(obs, "timestamp_ns"),
         "receive_host_time_ns": time.time_ns(),
         "packet_index": packet_index,
@@ -240,8 +243,10 @@ def main() -> int:
     start_mono = time.monotonic()
     last_progress_mono = start_mono
     last_packet_mono: Optional[float] = None
-    last_episode_robot_timestamp: Optional[int] = None
+    last_episode_start_robot_timestamp: Optional[int] = None
+    last_episode_end_robot_timestamp: Optional[int] = None
     last_episode_start = False
+    last_episode_end = False
     progress_period_s = 1.0 / args.print_hz if args.print_hz > 0.0 else 0.0
     flush_every = max(args.flush_every, 1)
 
@@ -290,23 +295,37 @@ def main() -> int:
             if obs is not None:
                 robot_timestamp = safe_get(obs, "timestamp_ns")
                 episode_start = bool(safe_get(obs, "status", "episode_start", default=False))
+                episode_end = bool(safe_get(obs, "status", "episode_end", default=False))
                 if (
                     episode_start
                     and not last_episode_start
-                    and robot_timestamp != last_episode_robot_timestamp
+                    and robot_timestamp != last_episode_start_robot_timestamp
                 ):
-                    episode = make_episode_event(obs, addr, count)
+                    episode = make_episode_event("episode_start", obs, addr, count)
                     episode_out.write(json.dumps(episode, separators=(",", ":"), sort_keys=True) + "\n")
                     if isinstance(robot_timestamp, int):
-                        last_episode_robot_timestamp = robot_timestamp
+                        last_episode_start_robot_timestamp = robot_timestamp
+                if (
+                    episode_end
+                    and not last_episode_end
+                    and robot_timestamp != last_episode_end_robot_timestamp
+                ):
+                    episode = make_episode_event("episode_end", obs, addr, count)
+                    episode_out.write(json.dumps(episode, separators=(",", ":"), sort_keys=True) + "\n")
+                    if isinstance(robot_timestamp, int):
+                        last_episode_end_robot_timestamp = robot_timestamp
                 last_episode_start = episode_start
+                last_episode_end = episode_end
                 count += 1
 
             if count > 0 and count % flush_every == 0:
                 out.flush()
+                episode_out.flush()
             if args.fsync_every > 0 and count > 0 and count % args.fsync_every == 0:
                 out.flush()
+                episode_out.flush()
                 os.fsync(out.fileno())
+                os.fsync(episode_out.fileno())
 
     sock.close()
     print_progress(args.output, count, invalid_count, bytes_written, start_mono, last_packet_mono)

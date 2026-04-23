@@ -42,7 +42,7 @@ constexpr double kStartupHomeArrivalToleranceRad = 5e-3;
 constexpr double kStartupHomeVelocityToleranceRadPerS = 2e-2;
 constexpr uint32_t kStartupHomeSettledCycles = 100;
 constexpr uint64_t kPlannerTargetGraceNs = 35000000ull;  // 35 ms
-constexpr uint64_t kEpisodeStartMarkerNs = 250000000ull;  // 250 ms
+constexpr uint64_t kEpisodeMarkerNs = 250000000ull;  // 250 ms
 constexpr std::array<double, 7> kPandaJointLowerLimitsRad{
     {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973}};
 constexpr std::array<double, 7> kPandaJointUpperLimitsRad{
@@ -569,8 +569,11 @@ void PlannerLoop(const TeleopBridgeConfig& config,
     TeleopMapper mapper(config);
     TeleopStateMachine state_machine;
     bool deadman_latched = false;
+    const bool use_a_button_for_episode_markers = !config.teleop.a_button_toggles_robot_control;
+    bool last_button_a = false;
     bool last_button_b = false;
     uint64_t episode_start_marker_until_ns = 0;
+    uint64_t episode_end_marker_until_ns = 0;
     bool has_recent_target = false;
     uint64_t last_valid_target_ns = 0;
     std::array<double, 7> last_valid_target_q{};
@@ -674,12 +677,24 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       } else if (control_value >= config.teleop.control_trigger_threshold) {
         deadman_latched = true;
       }
-      if (inputs.xr_stream_healthy && xr_cmd.button_b && !last_button_b) {
-        episode_start_marker_until_ns = now_ns + kEpisodeStartMarkerNs;
+      const bool button_a = inputs.xr_stream_healthy ? xr_cmd.button_a : false;
+      const bool button_b = inputs.xr_stream_healthy ? xr_cmd.button_b : false;
+      if (use_a_button_for_episode_markers) {
+        if (button_a && !last_button_a) {
+          episode_start_marker_until_ns = now_ns + kEpisodeMarkerNs;
+        }
+        if (button_b && !last_button_b) {
+          episode_end_marker_until_ns = now_ns + kEpisodeMarkerNs;
+        }
+      } else if (button_b && !last_button_b) {
+        episode_start_marker_until_ns = now_ns + kEpisodeMarkerNs;
       }
       planned.episode_start =
           episode_start_marker_until_ns != 0 && now_ns <= episode_start_marker_until_ns;
-      last_button_b = inputs.xr_stream_healthy ? xr_cmd.button_b : false;
+      planned.episode_end =
+          episode_end_marker_until_ns != 0 && now_ns <= episode_end_marker_until_ns;
+      last_button_a = button_a;
+      last_button_b = button_b;
       inputs.deadman_pressed = deadman_latched;
       inputs.robot_ok = robot.robot_ok;
       inputs.fault_requested = false;
@@ -1247,6 +1262,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
           obs.target_fresh = planned.target_fresh;
           obs.teleop_active = planned.teleop_active;
           obs.episode_start = planned.episode_start;
+          obs.episode_end = planned.episode_end;
           obs.target_manipulability = planned.manipulability;
           obs.faults = planned.faults;
           obs.faults.robot_not_ready = obs.faults.robot_not_ready || !robot_snapshot.robot_ok;

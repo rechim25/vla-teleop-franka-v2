@@ -100,9 +100,14 @@ In another terminal, record the UDP observations:
   --episode-events-output recordings/session_001/events.jsonl
 ```
 
-Press the Oculus right-controller B button to mark a new episode. The bridge  
-emits a one-shot `status.episode_start` marker in the UDP observation stream,  
-and the recorder writes a corresponding timestamp row to the events output file.
+When `teleop.a_button_toggles_robot_control: false`, press the Oculus
+right-controller A button to mark episode start and B to mark episode end. The
+bridge emits one-shot `status.episode_start` / `status.episode_end` markers in
+the UDP observation stream, and the recorder writes corresponding rows to the
+events output file.
+
+If `teleop.a_button_toggles_robot_control: true`, the bridge leaves A alone and
+falls back to the legacy behavior where B emits only `episode_start`.
 
 Optional flags:
 
