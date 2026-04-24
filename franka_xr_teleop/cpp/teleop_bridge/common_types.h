@@ -276,8 +276,9 @@ struct TeleopBridgeConfig {
       {{-1.0, 0.0, 0.0}},
       {{0.0, 1.0, 0.0}},
   }};
-  // Orientation deltas are applied in the tool local frame and can require
-  // different axis signs than translation for intuitive wrist motion.
+  // Orientation deltas are mapped in the XR/world frame. They can still use
+  // different axis signs than translation for intuitive wrist motion, but the
+  // command should not depend on the current facing direction of the gripper.
   std::array<std::array<double, 3>, 3> xr_to_robot_rotation_orientation{{
       {{0.0, 0.0, -1.0}},
       {{1.0, 0.0, 0.0}},

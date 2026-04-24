@@ -104,8 +104,9 @@ void TeleopMapper::ComputeMappedPoseFromAnchors(const Pose& current_robot_pose,
 
   const Eigen::Quaterniond xr_current = ToEigenQuat(xr_filtered_pose.q);
   const Eigen::Quaterniond xr_anchor = ToEigenQuat(anchor_xr_pose_.q);
-  // Compute controller rotation in the anchor-local frame so the resulting
-  // delta can be composed onto the robot target as a local/tool-frame motion.
+  // Compute controller rotation in the anchor-local frame, then map the
+  // resulting angle-axis into the robot/world frame so the command is applied
+  // globally instead of following the tool's current facing direction.
   Eigen::Quaterniond xr_local_delta = xr_anchor.conjugate() * xr_current;
   if (xr_local_delta.w() < 0.0) {
     xr_local_delta.coeffs() *= -1.0;
@@ -130,7 +131,7 @@ void TeleopMapper::ComputeMappedPoseFromAnchors(const Pose& current_robot_pose,
     delta_q = Eigen::AngleAxisd(angle, robot_rot_delta / angle);
   }
 
-  mapped_target_pose->q = ToArrayQuat(ToEigenQuat(anchor_robot_pose_.q) * delta_q);
+  mapped_target_pose->q = ToArrayQuat(delta_q * ToEigenQuat(anchor_robot_pose_.q));
   requested_action->delta_rotation_rad = robot_rot_array;
 }
 

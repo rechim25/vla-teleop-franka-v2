@@ -6,8 +6,8 @@ teleop:
   dry_run: false
   a_button_toggles_robot_control: false
   control_mode: position
-  scale_factor: 2.0
-  rotation_scale_factor: 1.0
+  scale_factor: 1.0
+  rotation_scale_factor: 0.25
   control_trigger_threshold: 0.9
   control_trigger_release_threshold: 0.8
   xr_pose_lowpass_alpha: 0.8
