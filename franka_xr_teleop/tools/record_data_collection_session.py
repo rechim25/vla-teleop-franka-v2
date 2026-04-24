@@ -156,8 +156,14 @@ def build_zed_command(
 ) -> List[str]:
     cmd = [str(script_dir() / "record_zed_camera.py")]
     camera_name = cfg.get("camera_name", "ee_zed_m")
+    left_camera_name = cfg.get("left_camera_name", f"{camera_name}_left")
+    right_camera_name = cfg.get("right_camera_name", f"{camera_name}_right")
     add_option(cmd, "--camera-name", camera_name)
     add_option(cmd, "--output-dir", session_dir / "cameras" / str(camera_name))
+    add_option(cmd, "--left-camera-name", left_camera_name)
+    add_option(cmd, "--right-camera-name", right_camera_name)
+    add_option(cmd, "--left-output-dir", session_dir / "cameras" / str(left_camera_name))
+    add_option(cmd, "--right-output-dir", session_dir / "cameras" / str(right_camera_name))
     add_option(cmd, "--serial", zed_serial if zed_serial is not None else cfg.get("serial", 0))
     add_option(cmd, "--resolution", cfg.get("resolution", "HD720"))
     add_option(cmd, "--fps", cfg.get("fps", 30))

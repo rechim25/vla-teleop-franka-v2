@@ -26,12 +26,17 @@ def default_output_dir() -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Record a ZED/ZED-M camera to rgb.mp4 plus frames.jsonl timestamps. "
-            "Optionally also records SVO and per-frame depth arrays."
+            "Record a ZED/ZED-M camera as two virtual cameras, one per stereo eye, "
+            "each with its own rgb.mp4 and frames.jsonl timestamps. Optionally also "
+            "records shared SVO and left-view depth arrays."
         )
     )
     parser.add_argument("--output-dir", type=Path, default=default_output_dir())
     parser.add_argument("--camera-name", default="ee_zed_m")
+    parser.add_argument("--left-camera-name", default="", help="Virtual camera name for VIEW.LEFT.")
+    parser.add_argument("--right-camera-name", default="", help="Virtual camera name for VIEW.RIGHT.")
+    parser.add_argument("--left-output-dir", type=Path, default=None, help="Output directory for VIEW.LEFT files.")
+    parser.add_argument("--right-output-dir", type=Path, default=None, help="Output directory for VIEW.RIGHT files.")
     parser.add_argument("--serial", type=int, default=0, help="ZED serial number; 0 uses first camera.")
     parser.add_argument(
         "--resolution",
@@ -59,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--video-codec",
         default="mp4v",
-        help="OpenCV fourcc for rgb.mp4 (default: mp4v; try avc1 if your OpenCV supports it).",
+        help="OpenCV fourcc for each virtual camera's rgb.mp4 (default: mp4v; try avc1 if your OpenCV supports it).",
     )
     parser.add_argument("--print-hz", type=float, default=1.0, help="Progress print rate; 0 disables.")
     return parser.parse_args()
@@ -190,6 +195,80 @@ def should_stop(start_mono: float, duration_s: float, frame_index: int, max_fram
     return False
 
 
+def create_video_writer(cv2: Any, path: Path, codec: str, fps: int, size: Tuple[int, int]) -> Any:
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*codec[:4]), float(fps), size)
+    if not writer.isOpened():
+        raise RuntimeError(f"Failed to open video writer for {path}")
+    return writer
+
+
+def bgra_to_bgr(cv2: Any, bgra: Any, output_size: Tuple[int, int]) -> Any:
+    bgr = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
+    if (bgr.shape[1], bgr.shape[0]) != output_size:
+        bgr = cv2.resize(bgr, output_size, interpolation=cv2.INTER_AREA)
+    return bgr
+
+
+def default_side_camera_name(base_name: str, side: str) -> str:
+    return f"{base_name}_{side}"
+
+
+def default_side_output_dir(base_output_dir: Path, side: str) -> Path:
+    return base_output_dir.with_name(f"{base_output_dir.name}_{side}")
+
+
+def relative_path(path: Optional[Path], start: Path) -> Optional[str]:
+    if path is None:
+        return None
+    return os.path.relpath(path, start)
+
+
+def build_camera_metadata(
+    *,
+    camera_name: str,
+    companion_camera_name: str,
+    camera_view: str,
+    svo_ref: Optional[str],
+    depth_dir: Optional[str],
+    resolution: str,
+    fps: int,
+    out_w: int,
+    out_h: int,
+    frame_w: int,
+    frame_h: int,
+    calibration: Dict[str, Any],
+) -> Dict[str, Any]:
+    notes = {
+        "T_ee_camera": "Fill this with the calibrated camera pose in end-effector frame.",
+        "timestamp_sync": "host_timestamp_ns uses the same host monotonic clock as robot timestamp_ns.",
+    }
+    if camera_view == "right" and depth_dir is None:
+        notes["depth"] = (
+            "Metric depth is stored only for the left virtual camera because the ZED SDK depth "
+            "measure is aligned to the left image frame."
+        )
+
+    return {
+        "camera_name": camera_name,
+        "camera_view": camera_view,
+        "stereo_companion_camera": companion_camera_name,
+        "created_unix_time_ns": time.time_ns(),
+        "host_clock": "time.monotonic_ns",
+        "rgb_video": "rgb.mp4",
+        "frames": "frames.jsonl",
+        "svo": svo_ref,
+        "depth_dir": depth_dir,
+        "requested_resolution": resolution,
+        "requested_fps": fps,
+        "image_width": out_w,
+        "image_height": out_h,
+        "source_image_width": frame_w,
+        "source_image_height": frame_h,
+        "calibration": calibration,
+        "notes": notes,
+    }
+
+
 def main() -> int:
     args = parse_args()
     if args.fps <= 0:
@@ -198,17 +277,34 @@ def main() -> int:
     if args.duration_s < 0.0 or args.max_frames < 0:
         print("--duration-s and --max-frames must be >= 0", file=sys.stderr)
         return 2
+    left_camera_name = args.left_camera_name or default_side_camera_name(args.camera_name, "left")
+    right_camera_name = args.right_camera_name or default_side_camera_name(args.camera_name, "right")
+    if left_camera_name == right_camera_name:
+        print("Left and right virtual camera names must be different.", file=sys.stderr)
+        return 2
+
+    left_output_dir = args.left_output_dir or default_side_output_dir(args.output_dir, "left")
+    right_output_dir = args.right_output_dir or default_side_output_dir(args.output_dir, "right")
+    if left_output_dir == right_output_dir:
+        print("Left and right output directories must be different.", file=sys.stderr)
+        return 2
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
     cv2, np, sl = import_dependencies()
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    rgb_path = args.output_dir / "rgb.mp4"
-    frames_path = args.output_dir / "frames.jsonl"
-    metadata_path = args.output_dir / "metadata.json"
+    left_output_dir.mkdir(parents=True, exist_ok=True)
+    right_output_dir.mkdir(parents=True, exist_ok=True)
+    if args.svo:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+    rgb_left_path = left_output_dir / "rgb.mp4"
+    rgb_right_path = right_output_dir / "rgb.mp4"
+    left_frames_path = left_output_dir / "frames.jsonl"
+    right_frames_path = right_output_dir / "frames.jsonl"
+    left_metadata_path = left_output_dir / "metadata.json"
+    right_metadata_path = right_output_dir / "metadata.json"
     svo_path = args.output_dir / "raw.svo"
-    depth_dir = args.output_dir / "depth"
+    depth_dir = left_output_dir / "depth"
     if args.depth:
         depth_dir.mkdir(parents=True, exist_ok=True)
 
@@ -216,7 +312,8 @@ def main() -> int:
     if args.svo:
         enable_svo(args, zed, sl, svo_path)
 
-    image = sl.Mat()
+    left_image = sl.Mat()
+    right_image = sl.Mat()
     depth = sl.Mat()
     runtime = sl.RuntimeParameters()
 
@@ -226,46 +323,66 @@ def main() -> int:
     if err != sl.ERROR_CODE.SUCCESS:
         zed.close()
         raise RuntimeError(f"Initial ZED grab failed: {err}")
-    zed.retrieve_image(image, sl.VIEW.LEFT)
-    first_bgra = image.get_data()
-    frame_h, frame_w = first_bgra.shape[:2]
+    zed.retrieve_image(left_image, sl.VIEW.LEFT)
+    zed.retrieve_image(right_image, sl.VIEW.RIGHT)
+    first_left_bgra = left_image.get_data()
+    first_right_bgra = right_image.get_data()
+    frame_h, frame_w = first_left_bgra.shape[:2]
+    right_frame_h, right_frame_w = first_right_bgra.shape[:2]
+    if (right_frame_w, right_frame_h) != (frame_w, frame_h):
+        zed.close()
+        raise RuntimeError(
+            "Left/right ZED views have different source sizes: "
+            f"left={frame_w}x{frame_h} right={right_frame_w}x{right_frame_h}"
+        )
     out_w = args.width if args.width > 0 else frame_w
     out_h = args.height if args.height > 0 else frame_h
+    output_size = (out_w, out_h)
 
-    writer = cv2.VideoWriter(
-        str(rgb_path),
-        cv2.VideoWriter_fourcc(*args.video_codec[:4]),
-        float(args.fps),
-        (out_w, out_h),
-    )
-    if not writer.isOpened():
+    try:
+        left_writer = create_video_writer(cv2, rgb_left_path, args.video_codec, args.fps, output_size)
+        right_writer = create_video_writer(cv2, rgb_right_path, args.video_codec, args.fps, output_size)
+    except Exception:
         zed.close()
-        raise RuntimeError(f"Failed to open video writer for {rgb_path}")
+        raise
 
-    metadata = {
-        "camera_name": args.camera_name,
-        "created_unix_time_ns": time.time_ns(),
-        "host_clock": "time.monotonic_ns",
-        "rgb_video": "rgb.mp4",
-        "frames": "frames.jsonl",
-        "svo": "raw.svo" if args.svo else None,
-        "depth_dir": "depth" if args.depth else None,
-        "requested_resolution": args.resolution,
-        "requested_fps": args.fps,
-        "image_width": out_w,
-        "image_height": out_h,
-        "source_image_width": frame_w,
-        "source_image_height": frame_h,
-        "calibration": get_calibration_metadata(zed),
-        "notes": {
-            "T_ee_camera": "Fill this with the calibrated camera pose in end-effector frame.",
-            "timestamp_sync": "host_timestamp_ns uses the same host monotonic clock as robot timestamp_ns.",
-        },
-    }
-    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    calibration = get_calibration_metadata(zed)
+    left_svo_ref = relative_path(svo_path if args.svo else None, left_output_dir)
+    right_svo_ref = relative_path(svo_path if args.svo else None, right_output_dir)
+    left_metadata = build_camera_metadata(
+        camera_name=left_camera_name,
+        companion_camera_name=right_camera_name,
+        camera_view="left",
+        svo_ref=left_svo_ref,
+        depth_dir="depth" if args.depth else None,
+        resolution=args.resolution,
+        fps=args.fps,
+        out_w=out_w,
+        out_h=out_h,
+        frame_w=frame_w,
+        frame_h=frame_h,
+        calibration=calibration,
+    )
+    right_metadata = build_camera_metadata(
+        camera_name=right_camera_name,
+        companion_camera_name=left_camera_name,
+        camera_view="right",
+        svo_ref=right_svo_ref,
+        depth_dir=None,
+        resolution=args.resolution,
+        fps=args.fps,
+        out_w=out_w,
+        out_h=out_h,
+        frame_w=frame_w,
+        frame_h=frame_h,
+        calibration=calibration,
+    )
+    left_metadata_path.write_text(json.dumps(left_metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    right_metadata_path.write_text(json.dumps(right_metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     print(
-        f"Recording ZED {args.camera_name}: rgb={rgb_path} frames={frames_path} "
+        f"Recording ZED {args.camera_name}: "
+        f"{left_camera_name}={left_output_dir} {right_camera_name}={right_output_dir} "
         f"svo={int(args.svo)} depth={int(args.depth)}",
         flush=True,
     )
@@ -275,58 +392,83 @@ def main() -> int:
     last_print = start_mono
     progress_period_s = 1.0 / args.print_hz if args.print_hz > 0.0 else 0.0
 
-    def write_frame(bgra: Any, zed_timestamp_ns: Optional[int]) -> None:
+    def write_frame(
+        left_bgra: Any,
+        right_bgra: Any,
+        zed_timestamp_ns: Optional[int],
+        left_frames_file: Any,
+        right_frames_file: Any,
+    ) -> None:
         nonlocal frame_index
         host_timestamp_ns = time.monotonic_ns()
-        bgr = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
-        if (out_w, out_h) != (frame_w, frame_h):
-            bgr = cv2.resize(bgr, (out_w, out_h), interpolation=cv2.INTER_AREA)
-        writer.write(bgr)
+        left_writer.write(bgra_to_bgr(cv2, left_bgra, output_size))
+        right_writer.write(bgra_to_bgr(cv2, right_bgra, output_size))
 
-        depth_file: Optional[str] = None
+        left_depth_file: Optional[str] = None
         if args.depth:
             zed.retrieve_measure(depth, sl.MEASURE.DEPTH)
             depth_arr = depth.get_data().astype(np.float32, copy=True)
-            depth_file = f"depth_{frame_index:06d}.npz"
-            np.savez_compressed(depth_dir / depth_file, depth_m=depth_arr)
+            left_depth_file = f"depth_{frame_index:06d}.npz"
+            np.savez_compressed(depth_dir / left_depth_file, depth_m=depth_arr)
 
-        record = {
-            "camera": args.camera_name,
+        left_record = {
+            "camera": left_camera_name,
             "frame_index": frame_index,
             "host_timestamp_ns": host_timestamp_ns,
             "zed_timestamp_ns": zed_timestamp_ns,
             "rgb_video": "rgb.mp4",
             "rgb_video_frame": frame_index,
-            "depth_file": depth_file,
+            "depth_file": left_depth_file,
             "width": out_w,
             "height": out_h,
         }
-        frames_file.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
+        right_record = {
+            "camera": right_camera_name,
+            "frame_index": frame_index,
+            "host_timestamp_ns": host_timestamp_ns,
+            "zed_timestamp_ns": zed_timestamp_ns,
+            "rgb_video": "rgb.mp4",
+            "rgb_video_frame": frame_index,
+            "depth_file": None,
+            "width": out_w,
+            "height": out_h,
+        }
+        left_frames_file.write(json.dumps(left_record, separators=(",", ":"), sort_keys=True) + "\n")
+        right_frames_file.write(json.dumps(right_record, separators=(",", ":"), sort_keys=True) + "\n")
         frame_index += 1
 
-    with frames_path.open("w", encoding="utf-8", buffering=1) as frames_file:
+    with left_frames_path.open("w", encoding="utf-8", buffering=1) as left_frames_file, \
+        right_frames_path.open("w", encoding="utf-8", buffering=1) as right_frames_file:
         ts = timestamp_to_ns(zed.get_timestamp(sl.TIME_REFERENCE.IMAGE))
-        write_frame(first_bgra, ts)
+        write_frame(first_left_bgra, first_right_bgra, ts, left_frames_file, right_frames_file)
 
         while not should_stop(start_mono, args.duration_s, frame_index, args.max_frames):
             err = zed.grab(runtime)
             if err != sl.ERROR_CODE.SUCCESS:
                 continue
-            zed.retrieve_image(image, sl.VIEW.LEFT)
+            zed.retrieve_image(left_image, sl.VIEW.LEFT)
+            zed.retrieve_image(right_image, sl.VIEW.RIGHT)
             ts = timestamp_to_ns(zed.get_timestamp(sl.TIME_REFERENCE.IMAGE))
-            write_frame(image.get_data(), ts)
+            write_frame(left_image.get_data(), right_image.get_data(), ts, left_frames_file, right_frames_file)
 
             now = time.monotonic()
             if progress_period_s > 0.0 and (now - last_print) >= progress_period_s:
                 elapsed = max(now - start_mono, 1e-9)
-                print(f"frames={frame_index} rate={frame_index / elapsed:.1f}Hz output={args.output_dir}")
+                print(
+                    f"frames={frame_index} rate={frame_index / elapsed:.1f}Hz "
+                    f"left={left_output_dir} right={right_output_dir}"
+                )
                 last_print = now
 
-    writer.release()
+    left_writer.release()
+    right_writer.release()
     if args.svo:
         zed.disable_recording()
     zed.close()
-    print(f"Stopped. frames={frame_index} output={args.output_dir}", flush=True)
+    print(
+        f"Stopped. frames={frame_index} left={left_output_dir} right={right_output_dir}",
+        flush=True,
+    )
     return 0
 
 

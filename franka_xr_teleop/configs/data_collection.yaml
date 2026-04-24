@@ -12,6 +12,8 @@ robot:
 zed:
   enabled: true
   camera_name: ee_zed_m
+  left_camera_name: ee_zed_m_left
+  right_camera_name: ee_zed_m_right
   serial: 0
   resolution: HD720
   fps: 30
