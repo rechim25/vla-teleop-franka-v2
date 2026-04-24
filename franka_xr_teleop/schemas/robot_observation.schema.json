@@ -3,7 +3,14 @@
   "$id": "robot_observation.schema.json",
   "title": "Robot Observation",
   "type": "object",
-  "required": ["timestamp_ns", "robot_state", "executed_action", "status"],
+  "required": [
+    "timestamp_ns",
+    "robot_state",
+    "desired_target_state",
+    "commanded_target_state",
+    "executed_action",
+    "status"
+  ],
   "properties": {
     "timestamp_ns": {"type": "integer", "minimum": 0},
     "robot_state": {
@@ -26,6 +33,42 @@
         },
         "gripper_width": {"type": "number"},
         "gripper_state": {"type": "string"}
+      }
+    },
+    "desired_target_state": {
+      "type": "object",
+      "required": ["tcp_position_xyz", "tcp_orientation_xyzw"],
+      "properties": {
+        "tcp_position_xyz": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "tcp_orientation_xyzw": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 4,
+          "maxItems": 4
+        }
+      }
+    },
+    "commanded_target_state": {
+      "type": "object",
+      "required": ["tcp_position_xyz", "tcp_orientation_xyzw"],
+      "properties": {
+        "tcp_position_xyz": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "tcp_orientation_xyzw": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 4,
+          "maxItems": 4
+        }
       }
     },
     "executed_action": {

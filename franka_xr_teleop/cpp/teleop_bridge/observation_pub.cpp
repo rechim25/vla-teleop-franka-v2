@@ -77,6 +77,22 @@ std::string ObservationPublisher::ToJson(const RobotObservation& obs) const {
   ss << "\"gripper_state\":\"" << ToString(obs.gripper_state) << "\"";
   ss << "},";
 
+  ss << "\"desired_target_state\":{";
+  ss << "\"tcp_position_xyz\":";
+  AppendArray(&ss, obs.desired_target_tcp_pose.p);
+  ss << ',';
+  ss << "\"tcp_orientation_xyzw\":";
+  AppendArray(&ss, obs.desired_target_tcp_pose.q);
+  ss << "},";
+
+  ss << "\"commanded_target_state\":{";
+  ss << "\"tcp_position_xyz\":";
+  AppendArray(&ss, obs.commanded_target_tcp_pose.p);
+  ss << ',';
+  ss << "\"tcp_orientation_xyzw\":";
+  AppendArray(&ss, obs.commanded_target_tcp_pose.q);
+  ss << "},";
+
   ss << "\"executed_action\":{";
   ss << "\"cartesian_delta_translation\":";
   AppendArray(&ss, obs.executed_action.delta_translation_m);

@@ -9,6 +9,7 @@ class TeleopMapper {
   explicit TeleopMapper(const TeleopBridgeConfig& config);
 
   void Reset();
+  void Reanchor(const Pose& target_robot_pose, const XRCommand& xr_cmd);
 
   bool ComputeTargetPose(const Pose& current_robot_pose,
                          const XRCommand& xr_cmd,
@@ -18,7 +19,8 @@ class TeleopMapper {
                          TeleopAction* requested_action);
 
  private:
-  void ComputeMappedPoseFromAnchors(const Pose& xr_filtered_pose,
+  void ComputeMappedPoseFromAnchors(const Pose& current_robot_pose,
+                                    const Pose& xr_filtered_pose,
                                     ControlMode control_mode,
                                     Pose* mapped_target_pose,
                                     TeleopAction* requested_action) const;
@@ -29,7 +31,8 @@ class TeleopMapper {
   Pose FilterXrPose(const Pose& raw_pose);
   static std::array<double, 3> ApplyVectorDeadband(const std::array<double, 3>& value,
                                                     double deadband);
-  std::array<double, 3> RotateXrVectorToRobot(const std::array<double, 3>& value) const;
+  std::array<double, 3> RotateXrTranslationToRobot(const std::array<double, 3>& value) const;
+  std::array<double, 3> RotateXrRotationToRobot(const std::array<double, 3>& value) const;
 
   TeleopBridgeConfig config_{};
   bool anchor_initialized_ = false;

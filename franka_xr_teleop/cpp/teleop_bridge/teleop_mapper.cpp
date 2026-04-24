@@ -19,6 +19,18 @@ void TeleopMapper::Reset() {
   still_since_ns_ = 0;
 }
 
+void TeleopMapper::Reanchor(const Pose& target_robot_pose, const XRCommand& xr_cmd) {
+  const Pose xr_filtered_pose = FilterXrPose(xr_cmd.right_controller_pose);
+  anchor_robot_pose_ = target_robot_pose;
+  anchor_xr_pose_ = xr_filtered_pose;
+  anchor_initialized_ = true;
+  xr_motion_initialized_ = true;
+  hold_frozen_ = false;
+  still_since_ns_ = 0;
+  last_motion_xr_pose_ = xr_filtered_pose;
+  last_xr_sequence_id_ = xr_cmd.sequence_id;
+}
+
 bool TeleopMapper::HoldFreezeEnabled(ControlMode control_mode) const {
   if (config_.teleop.xr_hold_dwell_s <= 0.0 || config_.teleop.xr_hold_release_multiplier < 1.0) {
     return false;
@@ -59,7 +71,8 @@ Pose TeleopMapper::FilterXrPose(const Pose& raw_pose) {
   return filtered_xr_pose_;
 }
 
-void TeleopMapper::ComputeMappedPoseFromAnchors(const Pose& xr_filtered_pose,
+void TeleopMapper::ComputeMappedPoseFromAnchors(const Pose& current_robot_pose,
+                                                const Pose& xr_filtered_pose,
                                                 ControlMode control_mode,
                                                 Pose* mapped_target_pose,
                                                 TeleopAction* requested_action) const {
@@ -70,7 +83,7 @@ void TeleopMapper::ComputeMappedPoseFromAnchors(const Pose& xr_filtered_pose,
   };
   const std::array<double, 3> xr_delta =
       ApplyVectorDeadband(xr_delta_raw, config_.teleop.xr_translation_deadband_m);
-  std::array<double, 3> robot_delta = RotateXrVectorToRobot(xr_delta);
+  std::array<double, 3> robot_delta = RotateXrTranslationToRobot(xr_delta);
   for (double& value : robot_delta) {
     value *= config_.teleop.scale_factor;
   }
@@ -91,10 +104,20 @@ void TeleopMapper::ComputeMappedPoseFromAnchors(const Pose& xr_filtered_pose,
 
   const Eigen::Quaterniond xr_current = ToEigenQuat(xr_filtered_pose.q);
   const Eigen::Quaterniond xr_anchor = ToEigenQuat(anchor_xr_pose_.q);
-  const Eigen::Vector3d xr_rot_delta_raw = QuaternionErrorAngleAxis(xr_anchor, xr_current);
+  // Compute controller rotation in the anchor-local frame so the resulting
+  // delta can be composed onto the robot target as a local/tool-frame motion.
+  Eigen::Quaterniond xr_local_delta = xr_anchor.conjugate() * xr_current;
+  if (xr_local_delta.w() < 0.0) {
+    xr_local_delta.coeffs() *= -1.0;
+  }
+  Eigen::AngleAxisd xr_local_angle_axis(xr_local_delta.normalized());
+  Eigen::Vector3d xr_rot_delta_raw = Eigen::Vector3d::Zero();
+  if (std::isfinite(xr_local_angle_axis.angle())) {
+    xr_rot_delta_raw = xr_local_angle_axis.axis() * xr_local_angle_axis.angle();
+  }
   const std::array<double, 3> xr_rot_array =
       ApplyVectorDeadband(ToArray3(xr_rot_delta_raw), config_.teleop.xr_rotation_deadband_rad);
-  std::array<double, 3> robot_rot_array = RotateXrVectorToRobot(xr_rot_array);
+  std::array<double, 3> robot_rot_array = RotateXrRotationToRobot(xr_rot_array);
   for (double& value : robot_rot_array) {
     value *= config_.teleop.rotation_scale_factor;
   }
@@ -107,7 +130,7 @@ void TeleopMapper::ComputeMappedPoseFromAnchors(const Pose& xr_filtered_pose,
     delta_q = Eigen::AngleAxisd(angle, robot_rot_delta / angle);
   }
 
-  mapped_target_pose->q = ToArrayQuat(delta_q * ToEigenQuat(anchor_robot_pose_.q));
+  mapped_target_pose->q = ToArrayQuat(ToEigenQuat(anchor_robot_pose_.q) * delta_q);
   requested_action->delta_rotation_rad = robot_rot_array;
 }
 
@@ -119,12 +142,23 @@ void TeleopMapper::SetFrozenOutput(const XRCommand& xr_cmd,
   requested_action->gripper_command = Clamp01(xr_cmd.gripper_trigger_value);
 }
 
-std::array<double, 3> TeleopMapper::RotateXrVectorToRobot(const std::array<double, 3>& value) const {
+std::array<double, 3> TeleopMapper::RotateXrTranslationToRobot(
+    const std::array<double, 3>& value) const {
   std::array<double, 3> out{};
   for (size_t row = 0; row < 3; ++row) {
     out[row] = config_.xr_to_robot_rotation[row][0] * value[0] +
                config_.xr_to_robot_rotation[row][1] * value[1] +
                config_.xr_to_robot_rotation[row][2] * value[2];
+  }
+  return out;
+}
+
+std::array<double, 3> TeleopMapper::RotateXrRotationToRobot(const std::array<double, 3>& value) const {
+  std::array<double, 3> out{};
+  for (size_t row = 0; row < 3; ++row) {
+    out[row] = config_.xr_to_robot_rotation_orientation[row][0] * value[0] +
+               config_.xr_to_robot_rotation_orientation[row][1] * value[1] +
+               config_.xr_to_robot_rotation_orientation[row][2] * value[2];
   }
   return out;
 }
@@ -153,18 +187,6 @@ bool TeleopMapper::ComputeTargetPose(const Pose& current_robot_pose,
     return false;
   }
 
-  Pose candidate_target_pose{};
-  TeleopAction candidate_action{};
-  candidate_action.gripper_command = Clamp01(xr_cmd.gripper_trigger_value);
-  ComputeMappedPoseFromAnchors(
-      xr_filtered_pose, control_mode, &candidate_target_pose, &candidate_action);
-
-  if (!HoldFreezeEnabled(control_mode)) {
-    *mapped_target_pose = candidate_target_pose;
-    *requested_action = candidate_action;
-    return true;
-  }
-
   if (!xr_motion_initialized_) {
     xr_motion_initialized_ = true;
     last_motion_xr_pose_ = xr_filtered_pose;
@@ -173,6 +195,22 @@ bool TeleopMapper::ComputeTargetPose(const Pose& current_robot_pose,
 
   const bool has_new_xr_sample =
       xr_motion_initialized_ && xr_cmd.sequence_id != 0 && xr_cmd.sequence_id != last_xr_sequence_id_;
+
+  Pose candidate_target_pose{};
+  TeleopAction candidate_action{};
+  candidate_action.gripper_command = Clamp01(xr_cmd.gripper_trigger_value);
+  ComputeMappedPoseFromAnchors(
+      current_robot_pose, xr_filtered_pose, control_mode, &candidate_target_pose, &candidate_action);
+
+  if (!HoldFreezeEnabled(control_mode)) {
+    if (has_new_xr_sample) {
+      last_motion_xr_pose_ = xr_filtered_pose;
+      last_xr_sequence_id_ = xr_cmd.sequence_id;
+    }
+    *mapped_target_pose = candidate_target_pose;
+    *requested_action = candidate_action;
+    return true;
+  }
 
   if (hold_frozen_ && !has_new_xr_sample) {
     SetFrozenOutput(xr_cmd, mapped_target_pose, requested_action);

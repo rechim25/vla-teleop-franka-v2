@@ -137,6 +137,7 @@ bool LoadTeleopConfig(const std::string& path, AppConfig* config, std::string* e
   if (const YAML::Node ik = teleop["ik"]; ik && ik.IsMap()) {
     ReadScalar(ik, "damping", &config->bridge.ik.damping);
     ReadScalar(ik, "nullspace_gain", &config->bridge.ik.nullspace_gain);
+    ReadScalar(ik, "planner_substeps", &config->bridge.ik.planner_substeps);
     ReadScalar(ik, "max_joint_velocity_radps", &config->bridge.ik.max_joint_velocity_radps);
     ReadScalar(ik, "max_joint_acceleration_radps2", &config->bridge.ik.max_joint_acceleration_radps2);
     ReadScalar(ik, "max_joint_jerk_radps3", &config->bridge.ik.max_joint_jerk_radps3);
@@ -202,6 +203,9 @@ bool LoadXrFrameConfig(const std::string& path, AppConfig* config, std::string* 
     *error = "Missing/invalid xr_frame.rotation_matrix_row_major in " + path;
     return false;
   }
+  ReadMatrix3(xr_frame,
+              "orientation_rotation_matrix_row_major",
+              &config->bridge.xr_to_robot_rotation_orientation);
   return true;
 }
 
@@ -355,6 +359,10 @@ bool LoadAppConfig(const std::string& config_dir, AppConfig* config, std::string
   }
   if (config->bridge.ik.max_joint_jerk_radps3 <= 0.0) {
     *error = "teleop.ik.max_joint_jerk_radps3 must be > 0";
+    return false;
+  }
+  if (config->bridge.ik.planner_substeps == 0) {
+    *error = "teleop.ik.planner_substeps must be >= 1";
     return false;
   }
   if (config->bridge.ik.target_smoothing_alpha < 0.0 ||

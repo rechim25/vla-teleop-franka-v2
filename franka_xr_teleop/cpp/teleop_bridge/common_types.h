@@ -156,6 +156,8 @@ struct RobotObservation {
   std::array<double, 7> q{};
   std::array<double, 7> dq{};
   Pose tcp_pose{};
+  Pose desired_target_tcp_pose{};
+  Pose commanded_target_tcp_pose{};
   double gripper_width = 0.0;
   GripperState gripper_state = GripperState::kOpen;
   TeleopAction executed_action{};
@@ -233,6 +235,7 @@ struct GripperConfig {
 struct IkConfig {
   double damping = 0.05;
   double nullspace_gain = 0.15;
+  uint32_t planner_substeps = 1;
   double max_joint_velocity_radps = 0.35;
   double max_joint_acceleration_radps2 = 1.5;
   double max_joint_jerk_radps3 = 12.0;
@@ -267,9 +270,17 @@ struct TeleopBridgeConfig {
   RobotLoadConfig load{};
   bool limit_rate = true;
   double lpf_cutoff_frequency = 100.0;
+  // Position deltas are mapped in the XR/world frame using this rotation.
   std::array<std::array<double, 3>, 3> xr_to_robot_rotation{{
       {{0.0, 0.0, -1.0}},
       {{-1.0, 0.0, 0.0}},
+      {{0.0, 1.0, 0.0}},
+  }};
+  // Orientation deltas are applied in the tool local frame and can require
+  // different axis signs than translation for intuitive wrist motion.
+  std::array<std::array<double, 3>, 3> xr_to_robot_rotation_orientation{{
+      {{0.0, 0.0, -1.0}},
+      {{1.0, 0.0, 0.0}},
       {{0.0, 1.0, 0.0}},
   }};
   bool allow_motion = true;
