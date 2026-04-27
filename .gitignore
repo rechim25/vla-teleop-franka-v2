@@ -5,8 +5,9 @@ Thumbs.db
 .vscode/
 
 # CMake / C++ build artifacts
-build/
+**/build/
 build_gripper_check
+**/build_radu/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
