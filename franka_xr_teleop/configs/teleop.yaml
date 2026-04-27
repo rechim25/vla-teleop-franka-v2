@@ -21,7 +21,8 @@ teleop:
   start_joint_positions_rad: [-0.03172855768968763, -1.463935324983971, 0.07933473784803836, -2.86077989514297, 0.05852869658116116, 2.345908166150277, 0.8116081573698255]
   ik:
     damping: 0.08
-    nullspace_gain: 0.0
+    nullspace_gain: 0.15
+    nullspace_joint_positions_rad: [0, -0.795, 0, -2.356, 0, 1.571, 0.785]
     planner_substeps: 8
     max_joint_velocity_radps: 1.5
     max_joint_acceleration_radps2: 6.0
