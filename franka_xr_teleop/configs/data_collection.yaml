@@ -19,6 +19,8 @@ zed:
   fps: 30
   width: 0
   height: 0
+  exposure: 70
+  auto_exposure: false
   svo: false
   svo_compression: H264
   depth: false

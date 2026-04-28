@@ -11,6 +11,10 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 STOP_REQUESTED = False
+EXPOSURE_AUTO_SENTINEL = -1
+EXPOSURE_MIN = 0
+EXPOSURE_MAX = 100
+POST_EXPOSURE_SETTLE_GRABS = 3
 
 
 def handle_signal(_signum: int, _frame: object) -> None:
@@ -31,6 +35,7 @@ def parse_args() -> argparse.Namespace:
             "records shared SVO and left-view depth arrays."
         )
     )
+    exposure_group = parser.add_mutually_exclusive_group()
     parser.add_argument("--output-dir", type=Path, default=default_output_dir())
     parser.add_argument("--camera-name", default="ee_zed_m")
     parser.add_argument("--left-camera-name", default="", help="Virtual camera name for VIEW.LEFT.")
@@ -60,6 +65,21 @@ def parse_args() -> argparse.Namespace:
         "--depth",
         action="store_true",
         help="Also save per-frame metric depth as compressed NPZ files. This is storage-heavy.",
+    )
+    exposure_group.add_argument(
+        "--exposure",
+        type=int,
+        default=None,
+        help=(
+            "Exposure level in the ZED SDK's documented range [0, 100], or -1 "
+            "to restore auto exposure. Manual exposure disables auto exposure "
+            "while leaving gain unchanged."
+        ),
+    )
+    exposure_group.add_argument(
+        "--auto-exposure",
+        action="store_true",
+        help="Explicitly enable the camera's automatic exposure mode.",
     )
     parser.add_argument(
         "--video-codec",
@@ -177,6 +197,57 @@ def open_zed(args: argparse.Namespace, sl: Any) -> Any:
     return zed
 
 
+def get_camera_setting(zed: Any, sl: Any, setting: Any, label: str) -> int:
+    read_err, value = zed.get_camera_settings(setting)
+    if read_err != sl.ERROR_CODE.SUCCESS:
+        raise RuntimeError(f"Failed to read ZED {label}: {read_err}")
+    return value
+
+
+def configure_exposure(args: argparse.Namespace, zed: Any, sl: Any) -> Optional[int]:
+    want_auto_exposure = args.auto_exposure or args.exposure == EXPOSURE_AUTO_SENTINEL
+    if want_auto_exposure:
+        err = zed.set_camera_settings(sl.VIDEO_SETTINGS.AEC_AGC, 1)
+        if err != sl.ERROR_CODE.SUCCESS:
+            raise RuntimeError(f"Failed to enable ZED auto exposure: {err}")
+        err = zed.set_camera_settings(sl.VIDEO_SETTINGS.EXPOSURE, EXPOSURE_AUTO_SENTINEL)
+        if err != sl.ERROR_CODE.SUCCESS:
+            raise RuntimeError(f"Failed to reset ZED exposure to auto: {err}")
+        aec_agc = get_camera_setting(zed, sl, sl.VIDEO_SETTINGS.AEC_AGC, "AEC_AGC state")
+        if aec_agc != 1:
+            raise RuntimeError(f"Requested ZED auto exposure, but camera reported AEC_AGC={aec_agc}")
+        exposure = get_camera_setting(zed, sl, sl.VIDEO_SETTINGS.EXPOSURE, "exposure after enabling auto mode")
+        return exposure
+
+    if args.exposure is None:
+        return None
+
+    if not EXPOSURE_MIN <= args.exposure <= EXPOSURE_MAX:
+        raise ValueError(
+            "--exposure must be -1 for auto exposure, or within the ZED SDK "
+            f"documented manual range [{EXPOSURE_MIN}, {EXPOSURE_MAX}]; got {args.exposure}"
+        )
+
+    err = zed.set_camera_settings(sl.VIDEO_SETTINGS.AEC_AGC, 0)
+    if err != sl.ERROR_CODE.SUCCESS:
+        raise RuntimeError(f"Failed to disable ZED auto exposure before manual exposure set: {err}")
+    err = zed.set_camera_settings(sl.VIDEO_SETTINGS.EXPOSURE, args.exposure)
+    if err != sl.ERROR_CODE.SUCCESS:
+        raise RuntimeError(f"Failed to set ZED exposure to {args.exposure}: {err}")
+
+    aec_agc = get_camera_setting(zed, sl, sl.VIDEO_SETTINGS.AEC_AGC, "AEC_AGC state")
+    if aec_agc != 0:
+        raise RuntimeError(
+            f"Requested manual ZED exposure {args.exposure}, but camera reported AEC_AGC={aec_agc}"
+        )
+    exposure = get_camera_setting(zed, sl, sl.VIDEO_SETTINGS.EXPOSURE, "exposure after setting it")
+    if exposure != args.exposure:
+        raise RuntimeError(
+            f"Requested ZED exposure {args.exposure}, but camera reported exposure {exposure}"
+        )
+    return exposure
+
+
 def enable_svo(args: argparse.Namespace, zed: Any, sl: Any, svo_path: Path) -> None:
     compression = svo_compression_value(sl, args.svo_compression)
     params = sl.RecordingParameters(str(svo_path), compression)
@@ -236,6 +307,8 @@ def build_camera_metadata(
     out_h: int,
     frame_w: int,
     frame_h: int,
+    exposure_mode: str,
+    exposure_value: Optional[int],
     calibration: Dict[str, Any],
 ) -> Dict[str, Any]:
     notes = {
@@ -264,6 +337,8 @@ def build_camera_metadata(
         "image_height": out_h,
         "source_image_width": frame_w,
         "source_image_height": frame_h,
+        "exposure_mode": exposure_mode,
+        "exposure_value": exposure_value,
         "calibration": calibration,
         "notes": notes,
     }
@@ -276,6 +351,15 @@ def main() -> int:
         return 2
     if args.duration_s < 0.0 or args.max_frames < 0:
         print("--duration-s and --max-frames must be >= 0", file=sys.stderr)
+        return 2
+    if args.exposure is not None and args.exposure != EXPOSURE_AUTO_SENTINEL and not (
+        EXPOSURE_MIN <= args.exposure <= EXPOSURE_MAX
+    ):
+        print(
+            f"--exposure must be -1 for auto exposure, or within the ZED SDK documented "
+            f"manual range [{EXPOSURE_MIN}, {EXPOSURE_MAX}]",
+            file=sys.stderr,
+        )
         return 2
     left_camera_name = args.left_camera_name or default_side_camera_name(args.camera_name, "left")
     right_camera_name = args.right_camera_name or default_side_camera_name(args.camera_name, "right")
@@ -323,6 +407,12 @@ def main() -> int:
     if err != sl.ERROR_CODE.SUCCESS:
         zed.close()
         raise RuntimeError(f"Initial ZED grab failed: {err}")
+    applied_exposure = configure_exposure(args, zed, sl)
+    for _ in range(POST_EXPOSURE_SETTLE_GRABS):
+        err = zed.grab(runtime)
+        if err != sl.ERROR_CODE.SUCCESS:
+            zed.close()
+            raise RuntimeError(f"ZED grab failed while settling exposure change: {err}")
     zed.retrieve_image(left_image, sl.VIEW.LEFT)
     zed.retrieve_image(right_image, sl.VIEW.RIGHT)
     first_left_bgra = left_image.get_data()
@@ -361,6 +451,14 @@ def main() -> int:
         out_h=out_h,
         frame_w=frame_w,
         frame_h=frame_h,
+        exposure_mode=(
+            "auto"
+            if args.auto_exposure or args.exposure == EXPOSURE_AUTO_SENTINEL
+            else "manual"
+            if args.exposure is not None
+            else "default"
+        ),
+        exposure_value=applied_exposure,
         calibration=calibration,
     )
     right_metadata = build_camera_metadata(
@@ -375,6 +473,14 @@ def main() -> int:
         out_h=out_h,
         frame_w=frame_w,
         frame_h=frame_h,
+        exposure_mode=(
+            "auto"
+            if args.auto_exposure or args.exposure == EXPOSURE_AUTO_SENTINEL
+            else "manual"
+            if args.exposure is not None
+            else "default"
+        ),
+        exposure_value=applied_exposure,
         calibration=calibration,
     )
     left_metadata_path.write_text(json.dumps(left_metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -383,7 +489,9 @@ def main() -> int:
     print(
         f"Recording ZED {args.camera_name}: "
         f"{left_camera_name}={left_output_dir} {right_camera_name}={right_output_dir} "
-        f"svo={int(args.svo)} depth={int(args.depth)}",
+        f"svo={int(args.svo)} depth={int(args.depth)} "
+        f"exposure_mode={'auto' if args.auto_exposure or args.exposure == EXPOSURE_AUTO_SENTINEL else 'manual' if args.exposure is not None else 'default'} "
+        f"exposure_value={applied_exposure}",
         flush=True,
     )
 
