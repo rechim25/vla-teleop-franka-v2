@@ -214,6 +214,19 @@ bool GripperStateSatisfiesDesired(GripperState actual, GripperState desired) {
   return actual == desired;
 }
 
+GripperState WidthToAnalogState(const GripperConfig& config, double width, bool closing_stalled) {
+  if (closing_stalled) {
+    return GripperState::kHold;
+  }
+  if (width >= (config.max_width_m - config.width_tolerance_m)) {
+    return GripperState::kOpen;
+  }
+  if (width <= (config.min_width_m + config.width_tolerance_m)) {
+    return GripperState::kClose;
+  }
+  return GripperState::kHold;
+}
+
 Eigen::Matrix<double, 6, 7> JacobianToEigen(const std::array<double, 42>& jacobian_col_major) {
   return Eigen::Map<const Eigen::Matrix<double, 6, 7, Eigen::ColMajor>>(jacobian_col_major.data());
 }
@@ -563,6 +576,7 @@ void PlannerLoop(const TeleopBridgeConfig& config,
                  uint32_t trace_decimation,
                  const std::atomic<GripperState>* active_gripper_state,
                  std::atomic<GripperState>* desired_gripper_state,
+                 std::atomic<double>* desired_gripper_width_m,
                  std::atomic<bool>* stop_requested) {
   try {
     const auto sleep_period =
@@ -604,12 +618,23 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       planned.desired_tcp_pose = robot.tcp_pose;
       planned.control_mode = ControlMode::kHold;
       const double gripper_trigger = Clamp01(xr_cmd.gripper_trigger_value);
-      const GripperState desired_state =
-          gripper_controller.UpdateDesiredState(config.gripper, gripper_trigger, now_ns);
-      const double gripper_command = desired_state == GripperState::kClose ? 1.0 : 0.0;
-      planned.target_gripper_width_m = MapStateToWidth(config.gripper, desired_state);
+      GripperState desired_state = GripperState::kOpen;
+      double gripper_command = 0.0;
+      double desired_gripper_width = config.gripper.max_width_m;
+      if (config.gripper.command_mode == GripperCommandMode::kAnalog) {
+        desired_gripper_width = MapTriggerToWidth(config.gripper, gripper_trigger);
+        gripper_command = gripper_trigger;
+        const double midpoint = 0.5 * (config.gripper.min_width_m + config.gripper.max_width_m);
+        desired_state = desired_gripper_width <= midpoint ? GripperState::kClose : GripperState::kOpen;
+      } else {
+        desired_state = gripper_controller.UpdateDesiredState(config.gripper, gripper_trigger, now_ns);
+        gripper_command = desired_state == GripperState::kClose ? 1.0 : 0.0;
+        desired_gripper_width = MapStateToWidth(config.gripper, desired_state);
+      }
+      planned.target_gripper_width_m = desired_gripper_width;
       planned.requested_action.gripper_command = gripper_command;
       desired_gripper_state->store(desired_state, std::memory_order_release);
+      desired_gripper_width_m->store(desired_gripper_width, std::memory_order_release);
       const double control_value = Clamp01(xr_cmd.control_trigger_value);
 
       bool has_target = false;
@@ -824,12 +849,110 @@ void PlannerLoop(const TeleopBridgeConfig& config,
 //
 // Only two logical states: kOpen and kClose. No preemption, no retry
 // escalation, no homing recovery. One action runs until it self-terminates.
+void GripperLoopAnalog(franka::Gripper* gripper,
+                       const GripperConfig& config,
+                       const std::atomic<double>* desired_gripper_width_m,
+                       std::atomic<GripperState>* active_gripper_state,
+                       std::atomic<double>* measured_gripper_width_m,
+                       std::atomic<bool>* stop_requested) {
+  try {
+    franka::GripperState measured_state = gripper->readOnce();
+    measured_gripper_width_m->store(measured_state.width, std::memory_order_release);
+    bool closing_stalled = false;
+    GripperState current_state = WidthToAnalogState(config, measured_state.width, closing_stalled);
+    active_gripper_state->store(current_state, std::memory_order_release);
+
+    auto set_state = [&](GripperState next_state) {
+      if (current_state == next_state) {
+        return;
+      }
+      current_state = next_state;
+      active_gripper_state->store(current_state, std::memory_order_release);
+    };
+
+    // Analog mode needs to respond to fine trigger motions. The XR device already
+    // has an effective coarse dead zone in the first half of travel, so do not
+    // reuse the binary-mode 2 mm command filter here.
+    const double min_delta_m = std::max(0.0, std::min(config.min_command_delta_m, 5e-4));
+    const double loop_rate_hz = std::max(config.max_command_rate_hz, 1.0);
+    const auto loop_sleep =
+        std::chrono::microseconds(static_cast<int64_t>(1e6 / loop_rate_hz));
+
+    while (!stop_requested->load(std::memory_order_acquire)) {
+      try {
+        measured_state = gripper->readOnce();
+      } catch (const std::exception& e) {
+        std::cerr << "Gripper analog read failed: " << e.what() << "\n";
+        std::this_thread::sleep_for(loop_sleep);
+        continue;
+      }
+
+      measured_gripper_width_m->store(measured_state.width, std::memory_order_release);
+      const double desired_width = ClampWidth(
+          config, desired_gripper_width_m->load(std::memory_order_acquire));
+      const double error = desired_width - measured_state.width;
+
+      if (closing_stalled) {
+        if (error > min_delta_m) {
+          closing_stalled = false;
+        } else {
+          set_state(WidthToAnalogState(config, measured_state.width, true));
+          std::this_thread::sleep_for(loop_sleep);
+          continue;
+        }
+      }
+
+      if (std::abs(error) <= min_delta_m) {
+        set_state(WidthToAnalogState(config, measured_state.width, false));
+        std::this_thread::sleep_for(loop_sleep);
+        continue;
+      }
+
+      const double command_width = desired_width;
+      const bool closing = error < 0.0;
+      const bool move_ok = gripper->move(command_width, config.speed_mps);
+      measured_state = gripper->readOnce();
+      measured_gripper_width_m->store(measured_state.width, std::memory_order_release);
+
+      if (closing) {
+        const bool blocked_before_target =
+            !move_ok &&
+            measured_state.width > (command_width + config.width_tolerance_m);
+        if (blocked_before_target) {
+          closing_stalled = true;
+          set_state(WidthToAnalogState(config, measured_state.width, true));
+          std::this_thread::sleep_for(loop_sleep);
+          continue;
+        }
+      }
+
+      set_state(WidthToAnalogState(config, measured_state.width, false));
+    }
+  } catch (const std::exception& e) {
+    std::cerr << "Gripper analog thread exception: " << e.what() << "\n";
+    stop_requested->store(true, std::memory_order_release);
+  } catch (...) {
+    std::cerr << "Gripper analog thread unknown exception\n";
+    stop_requested->store(true, std::memory_order_release);
+  }
+}
+
 void GripperLoop(franka::Gripper* gripper,
                  const GripperConfig& config,
                  const std::atomic<GripperState>* desired_gripper_state,
+                 const std::atomic<double>* desired_gripper_width_m,
                  std::atomic<GripperState>* active_gripper_state,
                  std::atomic<double>* measured_gripper_width_m,
                  std::atomic<bool>* stop_requested) {
+  if (config.command_mode == GripperCommandMode::kAnalog) {
+    GripperLoopAnalog(gripper,
+                      config,
+                      desired_gripper_width_m,
+                      active_gripper_state,
+                      measured_gripper_width_m,
+                      stop_requested);
+    return;
+  }
   try {
     franka::GripperState measured_state = gripper->readOnce();
     measured_gripper_width_m->store(measured_state.width, std::memory_order_release);
@@ -1150,6 +1273,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
     planned_target_buffer.Publish(initial_plan);
 
     std::atomic<GripperState> desired_gripper_state{GripperState::kOpen};
+    std::atomic<double> desired_gripper_width_m{config_.gripper.max_width_m};
     const GripperState initial_gripper_state = !config_.gripper.enabled
                                                    ? GripperState::kOpen
                                                    : (gripper == nullptr
@@ -1171,6 +1295,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
                                  std::max<uint32_t>(1, options_.trace.planner_decimation),
                                  &active_gripper_state,
                                  &desired_gripper_state,
+                                 &desired_gripper_width_m,
                                  stop_requested);
 
     if (gripper != nullptr && config_.allow_motion) {
@@ -1179,6 +1304,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
                                    gripper.get(),
                                    std::cref(config_.gripper),
                                    &desired_gripper_state,
+                                   &desired_gripper_width_m,
                                    &active_gripper_state,
                                    &measured_gripper_width_m,
                                    stop_requested);
