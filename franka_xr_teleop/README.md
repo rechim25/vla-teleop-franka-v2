@@ -157,9 +157,9 @@ Or manually record only UDP robot observations:
 
 Add `--with-receive-metadata` to include host receive timestamps and source
 address around each observation record. Pressing the Oculus right-controller B
-button emits a one-shot `status.episode_start` marker in the UDP stream; the
-recorder writes those markers to `recordings/session_001/episode_events.jsonl`
-by default.
+button emits a one-shot `status.episode_end` marker in the UDP stream and then
+triggers the full gripper-open plus arm rehome sequence; the recorder writes
+those markers to `recordings/session_001/episode_events.jsonl` by default.
 
 Record the end-effector ZED/ZED-M camera on the same host:
 

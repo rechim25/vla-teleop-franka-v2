@@ -114,10 +114,11 @@ When `teleop.a_button_toggles_robot_control: false`, press the Oculus
 right-controller A button to mark episode start and B to mark episode end. The
 bridge emits one-shot `status.episode_start` / `status.episode_end` markers in
 the UDP observation stream, and the recorder writes corresponding rows to the
-events output file.
+events output file. After the `episode_end` marker is emitted, the bridge also
+opens the gripper and runs the full rehome route before the next episode.
 
 If `teleop.a_button_toggles_robot_control: true`, the bridge leaves A alone and
-falls back to the legacy behavior where B emits only `episode_start`.
+still uses B as `episode_end` plus rehome.
 
 Optional flags:
 
