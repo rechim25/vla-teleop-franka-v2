@@ -154,6 +154,7 @@ struct PlannedTarget {
 struct RobotObservation {
   uint64_t timestamp_ns = 0;
   std::array<double, 7> q{};
+  std::array<double, 7> q_cmd{};
   std::array<double, 7> dq{};
   Pose tcp_pose{};
   Pose desired_target_tcp_pose{};

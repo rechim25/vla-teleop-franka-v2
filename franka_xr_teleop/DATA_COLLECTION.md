@@ -40,6 +40,10 @@ a ZED SDK backup for later re-extraction.
 The robot UDP observation packet includes `timestamp_ns`, stamped on the host
 with a monotonic clock in the robot control callback.
 
+For joint-space learning or analysis, `robot_state.q` is the measured joint
+state and `robot_state.q_cmd` is the post-smoothing IK joint command that was
+actually sent toward the robot in the realtime loop.
+
 The ZED recorder logs each frame with `host_timestamp_ns`, also using the same
 host monotonic clock. Since the ZED is plugged into the same host computer, these
 timestamps can be matched directly for frame-level sync.

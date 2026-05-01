@@ -82,7 +82,7 @@ Incoming normalized command fields used by the bridge:
 `timestamp_ns` is stamped on command receive using workstation monotonic time so timeout-to-hold logic is clock-safe.
 
 Outgoing observation stream (UDP JSON):
-- robot state: `q`, `dq`, TCP pose, gripper width, gripper state
+- robot state: `q`, `q_cmd`, `dq`, TCP pose, gripper width, gripper state
 - executed action: cartesian delta, gripper command
 - status: control mode, teleop state, packet age, fault flags
 

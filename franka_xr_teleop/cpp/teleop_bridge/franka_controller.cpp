@@ -1391,6 +1391,7 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
           RobotObservation obs{};
           obs.timestamp_ns = now_ns;
           obs.q = state.q;
+          obs.q_cmd = q_cmd;
           obs.dq = state.dq;
           obs.tcp_pose = MatrixToPose(state.O_T_EE);
           obs.desired_target_tcp_pose = planned.desired_tcp_pose;
