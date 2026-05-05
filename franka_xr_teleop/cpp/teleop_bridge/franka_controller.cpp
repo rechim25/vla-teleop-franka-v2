@@ -890,11 +890,21 @@ void PlannerLoop(const TeleopBridgeConfig& config,
         continue;
       }
 
-      // Safety target shaping is intentionally bypassed in this simplified mode:
-      // planner uses mapper output directly for IK.
-      safe_target = true;
-      safe_pose = desired_pose;
+      safe_target = safety.FilterTargetPose(robot.tcp_pose,
+                                            desired_pose,
+                                            packet_age_s,
+                                            &planned.faults,
+                                            &safe_pose);
       planned.desired_tcp_pose = safe_pose;
+      if (!safe_target) {
+        has_recent_target = false;
+        planned.control_mode = ControlMode::kHold;
+        planned.target_fresh = false;
+        planned_target_buffer->Publish(planned);
+        publish_trace();
+        std::this_thread::sleep_for(sleep_period);
+        continue;
+      }
 
       double manipulability = 0.0;
       ik_ok = SolveIkStep(model,
