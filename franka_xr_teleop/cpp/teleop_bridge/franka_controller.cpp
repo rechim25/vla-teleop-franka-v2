@@ -686,6 +686,15 @@ void PlannerLoop(const TeleopBridgeConfig& config,
           completed_rehome_request_id->load(std::memory_order_acquire);
       if (completed_rehome_id_snapshot != last_seen_completed_rehome_request_id) {
         gripper_controller.Reset(GripperState::kOpen);
+        // Re-home moves the robot outside the normal teleop path, so any cached
+        // IK/planner target from before the move is stale and must not be reused
+        // as the next XR anchor.
+        has_recent_target = false;
+        last_valid_target_ns = 0;
+        last_valid_target_q = robot.q;
+        last_valid_desired_pose = robot.tcp_pose;
+        last_valid_control_mode = ControlMode::kHold;
+        last_valid_manipulability = 0.0;
         last_seen_completed_rehome_request_id = completed_rehome_id_snapshot;
       }
       const double gripper_trigger = Clamp01(xr_cmd.gripper_trigger_value);
