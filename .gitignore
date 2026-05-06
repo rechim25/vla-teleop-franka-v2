@@ -43,4 +43,5 @@ venv/
 
 # Recordings
 recordings/
+recordings_backfilled/
 franka_xr_teleop/recordings/

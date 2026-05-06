@@ -82,6 +82,9 @@ bool LoadSafetyConfig(const std::string& path, AppConfig* config, std::string* e
   ReadScalar(safety, "jump_reject_rotation_rad", &config->bridge.safety.jump_reject_rotation_rad);
   ReadArray(safety, "workspace_min_xyz", &config->bridge.safety.workspace_min);
   ReadArray(safety, "workspace_max_xyz", &config->bridge.safety.workspace_max);
+  ReadScalar(safety,
+             "enforce_workspace_limits_during_rehome",
+             &config->bridge.safety.enforce_workspace_limits_during_rehome);
   return true;
 }
 

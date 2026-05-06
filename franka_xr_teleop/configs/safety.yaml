@@ -6,5 +6,6 @@ safety:
   jump_reject_translation_m: 1.00
   jump_reject_rotation_rad: 3.1416
   workspace_min_xyz: [0.32, -0.45, 0.05]
-  workspace_max_xyz: [0.80, 0.45, 0.85]
+  workspace_max_xyz: [0.80, 0.45, 0.30]
+  enforce_workspace_limits_during_rehome: false
   packet_timeout_s: 0.120

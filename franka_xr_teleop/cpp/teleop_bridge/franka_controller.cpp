@@ -147,11 +147,12 @@ bool MoveToLiftPose(franka::Robot* robot,
   const franka::RobotState state0 = robot->readOnce();
   const double current_z = state0.O_T_EE[14];
   const double workspace_min_z = safety.workspace_min[2];
-  const double workspace_max_z = safety.workspace_max[2];
-  const double lift_target_z =
-      std::clamp(std::max(current_z, workspace_min_z + kRehomeLiftClearanceAboveWorkspaceMinM),
-                 workspace_min_z,
-                 workspace_max_z - kRehomeTopWorkspaceMarginM);
+  double lift_target_z = std::max(current_z, workspace_min_z + kRehomeLiftClearanceAboveWorkspaceMinM);
+  if (safety.enforce_workspace_limits_during_rehome) {
+    const double workspace_max_z = safety.workspace_max[2];
+    lift_target_z = std::clamp(
+        lift_target_z, workspace_min_z, workspace_max_z - kRehomeTopWorkspaceMarginM);
+  }
   if (lift_target_z <= current_z + kRehomeLiftTriggerToleranceM) {
     return true;
   }
@@ -823,16 +824,21 @@ void PlannerLoop(const TeleopBridgeConfig& config,
       const bool rehome_requested =
           requested_rehome_id > completed_rehome_id ||
           rehome_in_progress->load(std::memory_order_acquire);
+      const GripperState latched_gripper_state =
+          desired_gripper_state->load(std::memory_order_acquire);
+      const double latched_gripper_width =
+          desired_gripper_width_m->load(std::memory_order_acquire);
       if (rehome_requested) {
         deadman_latched = false;
-        desired_state = GripperState::kOpen;
-        gripper_command = 0.0;
-        desired_gripper_width = config.gripper.max_width_m;
+        desired_state = latched_gripper_state;
+        desired_gripper_width = latched_gripper_width;
       }
       planned.target_gripper_width_m = desired_gripper_width;
       planned.requested_action.gripper_command = gripper_command;
-      desired_gripper_state->store(desired_state, std::memory_order_release);
-      desired_gripper_width_m->store(desired_gripper_width, std::memory_order_release);
+      if (!rehome_requested) {
+        desired_gripper_state->store(desired_state, std::memory_order_release);
+        desired_gripper_width_m->store(desired_gripper_width, std::memory_order_release);
+      }
       inputs.deadman_pressed = rehome_requested ? false : deadman_latched;
       inputs.robot_ok = robot.robot_ok;
       inputs.fault_requested = false;
@@ -1375,12 +1381,12 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
       std::cerr << "Failed to recover robot from reflex mode.\n";
       return 5;
     }
-    if (gripper != nullptr) {
-      CommandGripperOpen(gripper.get(), config_.gripper, &measured_gripper_width_m);
-    }
     if (!MoveToSafeHomeRoute(&robot, config_, stop_requested)) {
       std::cerr << "Home move interrupted.\n";
       return 6;
+    }
+    if (gripper != nullptr) {
+      CommandGripperOpen(gripper.get(), config_.gripper, &measured_gripper_width_m);
     }
 
     franka::Model model = robot.loadModel();
@@ -1625,8 +1631,6 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
         }
         if (pending_rehome_request_id != 0) {
           rehome_in_progress.store(true, std::memory_order_release);
-          desired_gripper_state.store(GripperState::kOpen, std::memory_order_release);
-          desired_gripper_width_m.store(config_.gripper.max_width_m, std::memory_order_release);
           if (!RecoverRobotIfNeeded(&robot)) {
             std::cerr << "Failed to recover robot before rehome.\n";
             return 5;
@@ -1643,6 +1647,8 @@ int FrankaTeleopController::Run(std::atomic<bool>* stop_requested) {
             std::cerr << "Runtime rehome interrupted.\n";
             return 6;
           }
+          desired_gripper_state.store(GripperState::kOpen, std::memory_order_release);
+          desired_gripper_width_m.store(config_.gripper.max_width_m, std::memory_order_release);
           const RobotSnapshot home_snapshot = ToSnapshot(robot.readOnce());
           robot_state_buffer.Publish(home_snapshot);
           completed_rehome_request_id.store(pending_rehome_request_id, std::memory_order_release);

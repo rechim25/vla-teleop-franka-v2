@@ -184,6 +184,7 @@ struct SafetyLimits {
   double jump_reject_rotation_rad = 0.80;
   std::array<double, 3> workspace_min{{0.20, -0.45, 0.05}};
   std::array<double, 3> workspace_max{{0.80, 0.45, 0.85}};
+  bool enforce_workspace_limits_during_rehome = true;
 };
 
 struct TeleopRuntimeConfig {
