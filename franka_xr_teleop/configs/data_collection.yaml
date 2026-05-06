@@ -7,7 +7,7 @@ robot:
   with_receive_metadata: false
   flush_every: 50
   fsync_every: 0
-  print_hz: 1.0
+  print_hz: 0.1
 
 cameras:
   - id: third_person
@@ -21,11 +21,13 @@ cameras:
     depth_width: 640
     depth_height: 480
     fps: 30
+    exposure: 12000
+    auto_exposure: false
     depth: false
     align_depth: true
     bag: false
     video_codec: mp4v
-    print_hz: 1.0
+    print_hz: 0.1
 
   - id: wrist
     enabled: true
@@ -38,11 +40,13 @@ cameras:
     depth_width: 640
     depth_height: 480
     fps: 30
+    exposure: 12000
+    auto_exposure: false
     depth: false
     align_depth: true
     bag: false
     video_codec: mp4v
-    print_hz: 1.0
+    print_hz: 0.1
 
   - id: zed_wrist
     enabled: false

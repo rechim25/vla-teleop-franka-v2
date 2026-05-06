@@ -10,6 +10,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 STOP_REQUESTED = False
+EXPOSURE_AUTO_SENTINEL = -1
 
 
 def handle_signal(_signum: int, _frame: object) -> None:
@@ -29,6 +30,7 @@ def parse_args() -> argparse.Namespace:
             "timestamps. Optional depth and .bag backup are supported."
         )
     )
+    exposure_group = parser.add_mutually_exclusive_group()
     parser.add_argument("--output-dir", type=Path, default=default_output_dir())
     parser.add_argument("--camera-name", default="third_person_d405")
     parser.add_argument(
@@ -59,6 +61,20 @@ def parse_args() -> argparse.Namespace:
         "--bag",
         action="store_true",
         help="Also record a RealSense .bag file for SDK playback/re-extraction.",
+    )
+    exposure_group.add_argument(
+        "--exposure",
+        type=int,
+        default=None,
+        help=(
+            "Manual RGB exposure for the RealSense color sensor, or -1 to restore "
+            "auto exposure. The valid manual range is read from the camera."
+        ),
+    )
+    exposure_group.add_argument(
+        "--auto-exposure",
+        action="store_true",
+        help="Explicitly enable automatic RGB exposure on the RealSense color sensor.",
     )
     parser.add_argument(
         "--video-codec",
@@ -213,6 +229,115 @@ def profile_metadata(rs: Any, profile: Any, depth_scale_m: Optional[float]) -> D
     return metadata
 
 
+def option_range_dict(option_range: Any) -> Dict[str, float]:
+    return {
+        "min": float(option_range.min),
+        "max": float(option_range.max),
+        "step": float(option_range.step),
+        "default": float(option_range.default),
+    }
+
+
+def find_exposure_sensor(rs: Any, device: Any) -> Any:
+    preferred_sensor = None
+    fallback_sensor = None
+    seen_sensor_names: List[str] = []
+
+    for sensor in device.query_sensors():
+        sensor_name = safe_camera_info(rs, sensor, rs.camera_info.name) or "unknown"
+        seen_sensor_names.append(sensor_name)
+        supports_auto = bool(sensor.supports(rs.option.enable_auto_exposure))
+        supports_exposure = bool(sensor.supports(rs.option.exposure))
+        if not (supports_auto and supports_exposure):
+            continue
+        if fallback_sensor is None:
+            fallback_sensor = sensor
+        lowered_name = sensor_name.lower()
+        if "rgb" in lowered_name or "color" in lowered_name:
+            preferred_sensor = sensor
+            break
+
+    if preferred_sensor is not None:
+        return preferred_sensor
+    if fallback_sensor is not None:
+        return fallback_sensor
+    raise RuntimeError(
+        "Failed to find a RealSense sensor with both auto-exposure and exposure controls. "
+        f"Detected sensors: {', '.join(seen_sensor_names) if seen_sensor_names else 'none'}"
+    )
+
+
+def read_sensor_option(sensor: Any, option: Any, label: str) -> float:
+    try:
+        return float(sensor.get_option(option))
+    except RuntimeError as exc:
+        raise RuntimeError(f"Failed to read RealSense {label}: {exc}") from exc
+
+
+def configure_color_exposure(args: argparse.Namespace, rs: Any, profile: Any) -> Dict[str, Any]:
+    sensor = find_exposure_sensor(rs, profile.get_device())
+    supports_auto = bool(sensor.supports(rs.option.enable_auto_exposure))
+    supports_exposure = bool(sensor.supports(rs.option.exposure))
+    exposure_range = option_range_dict(sensor.get_option_range(rs.option.exposure)) if supports_exposure else None
+    requested_auto = args.auto_exposure or args.exposure == EXPOSURE_AUTO_SENTINEL
+
+    result: Dict[str, Any] = {
+        "mode": "default",
+        "supports_auto_exposure": supports_auto,
+        "supports_manual_exposure": supports_exposure,
+        "manual_exposure_range": exposure_range,
+    }
+
+    if requested_auto:
+        if not supports_auto:
+            raise RuntimeError("RealSense color sensor does not support automatic exposure control.")
+        try:
+            sensor.set_option(rs.option.enable_auto_exposure, 1.0)
+        except RuntimeError as exc:
+            raise RuntimeError(f"Failed to enable RealSense auto exposure: {exc}") from exc
+        result["mode"] = "auto"
+    elif args.exposure is not None:
+        if not supports_exposure:
+            raise RuntimeError("RealSense color sensor does not support manual exposure control.")
+        if not supports_auto:
+            raise RuntimeError("RealSense color sensor does not expose auto-exposure toggle required for manual mode.")
+        assert exposure_range is not None
+        exposure_value = float(args.exposure)
+        if not exposure_range["min"] <= exposure_value <= exposure_range["max"]:
+            raise ValueError(
+                "--exposure must be -1 for auto exposure, or within the RealSense "
+                f"camera's supported range [{exposure_range['min']:.0f}, {exposure_range['max']:.0f}]; "
+                f"got {args.exposure}"
+            )
+        try:
+            sensor.set_option(rs.option.enable_auto_exposure, 0.0)
+            sensor.set_option(rs.option.exposure, exposure_value)
+        except RuntimeError as exc:
+            raise RuntimeError(f"Failed to set RealSense RGB exposure to {args.exposure}: {exc}") from exc
+        actual_auto = read_sensor_option(sensor, rs.option.enable_auto_exposure, "auto exposure state")
+        if actual_auto != 0.0:
+            raise RuntimeError(
+                f"Requested manual RealSense exposure {args.exposure}, but camera reported auto_exposure={actual_auto}"
+            )
+        actual_exposure = read_sensor_option(sensor, rs.option.exposure, "exposure after setting it")
+        tolerance = max(exposure_range["step"] / 2.0, 1e-6)
+        if abs(actual_exposure - exposure_value) > tolerance:
+            raise RuntimeError(
+                f"Requested RealSense exposure {args.exposure}, but camera reported exposure {actual_exposure}"
+            )
+        result["mode"] = "manual"
+        result["requested_exposure"] = int(args.exposure)
+
+    if supports_auto:
+        result["auto_exposure_enabled"] = bool(round(read_sensor_option(sensor, rs.option.enable_auto_exposure, "auto exposure state")))
+    if supports_exposure:
+        result["exposure"] = read_sensor_option(sensor, rs.option.exposure, "exposure")
+    sensor_name = safe_camera_info(rs, sensor, rs.camera_info.name)
+    if sensor_name:
+        result["sensor_name"] = sensor_name
+    return result
+
+
 def configure_pipeline(args: argparse.Namespace, rs: Any, bag_path: Path) -> Tuple[Any, Any]:
     pipeline = rs.pipeline()
     config = rs.config()
@@ -246,6 +371,13 @@ def should_stop(start_mono: float, duration_s: float, frame_index: int, max_fram
     if max_frames > 0 and frame_index >= max_frames:
         return True
     return False
+
+
+def safe_stop_pipeline(pipeline: Any) -> None:
+    try:
+        pipeline.stop()
+    except RuntimeError:
+        pass
 
 
 def extrinsics_metadata(role: str) -> Tuple[Optional[str], Dict[str, str]]:
@@ -289,10 +421,19 @@ def main() -> int:
     if args.depth:
         depth_dir.mkdir(parents=True, exist_ok=True)
 
+    pipeline = None
     try:
         pipeline, config = configure_pipeline(args, rs, bag_path)
         profile = pipeline.start(config)
+        exposure_state = configure_color_exposure(args, rs, profile)
+    except ValueError as exc:
+        if pipeline is not None:
+            safe_stop_pipeline(pipeline)
+        print(str(exc), file=sys.stderr)
+        return 2
     except RuntimeError as exc:
+        if pipeline is not None:
+            safe_stop_pipeline(pipeline)
         print(explain_realsense_runtime_error(exc), file=sys.stderr)
         return 1
     align = rs.align(rs.stream.color) if args.depth and not args.no_align_depth else None
@@ -325,6 +466,7 @@ def main() -> int:
         "depth_dir": "depth" if args.depth else None,
         "depth_aligned_to_color": bool(align is not None),
         "requested_fps": args.fps,
+        "color_exposure": exposure_state,
         "profile": profile_metadata(rs, profile, depth_scale_m),
         "notes": notes,
     }
@@ -332,7 +474,7 @@ def main() -> int:
 
     print(
         f"Recording RealSense {args.camera_name}: rgb={rgb_path} frames={frames_path} "
-        f"bag={int(args.bag)} depth={int(args.depth)}",
+        f"bag={int(args.bag)} depth={int(args.depth)} exposure_mode={exposure_state['mode']}",
         flush=True,
     )
 

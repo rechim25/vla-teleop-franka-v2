@@ -270,6 +270,8 @@ def build_realsense_command(
     force_bag: bool,
     force_depth: bool,
 ) -> List[str]:
+    if cfg.get("exposure") not in (None, -1) and bool_value(cfg, "auto_exposure", False):
+        raise ValueError(f"config.cameras[{cfg['id']}].exposure and auto_exposure cannot both be set")
     cmd = [str(script_dir() / "record_realsense_camera.py")]
     camera_name = cfg.get("camera_name", "third_person_d405")
     add_option(cmd, "--camera-name", camera_name)
@@ -284,6 +286,8 @@ def build_realsense_command(
     add_option(cmd, "--duration-s", duration_s)
     add_option(cmd, "--video-codec", cfg.get("video_codec", "mp4v"))
     add_option(cmd, "--print-hz", cfg.get("print_hz", 1.0))
+    add_option(cmd, "--exposure", cfg.get("exposure"))
+    add_flag(cmd, bool_value(cfg, "auto_exposure", False), "--auto-exposure")
     add_flag(cmd, bool_value(cfg, "depth", False) or force_depth, "--depth")
     add_flag(cmd, not bool_value(cfg, "align_depth", True), "--no-align-depth")
     add_flag(cmd, bool_value(cfg, "bag", False) or force_bag, "--bag")
